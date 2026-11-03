@@ -1,0 +1,47 @@
+[
+  {
+    "rank": 1,
+    "rotationKey": "t1450+zl505416_pie4105",
+    "score": 84.55,
+    "scoreBreakdown": {
+      "deal": 22.74,
+      "satiety": 31.25,
+      "novelty": 4.17,
+      "low_repeat": 18.52,
+      "drink": 7.87
+    },
+    "priceFen": 2880,
+    "source": "candidates",
+    "humanSummary": "随心配1+1三件套（麦香鸡+小薯条+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+菠萝派）≈¥28.8"
+  },
+  {
+    "rank": 2,
+    "rotationKey": "sj1120+zl505416_pie4106",
+    "score": 70.66,
+    "scoreBreakdown": {
+      "deal": 22.74,
+      "satiety": 31.25,
+      "novelty": 4.17,
+      "low_repeat": 4.63,
+      "drink": 7.87
+    },
+    "priceFen": 2880,
+    "source": "candidates",
+    "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+香芋派）— 白区派种轮换，结构同已验证双1+1"
+  },
+  {
+    "rank": 3,
+    "rotationKey": "sj1120+zl505416_pie4105",
+    "score": 66.03,
+    "scoreBreakdown": {
+      "deal": 22.74,
+      "satiety": 31.25,
+      "novelty": 4.17,
+      "low_repeat": 0.0,
+      "drink": 7.87
+    },
+    "priceFen": 2880,
+    "source": "candidates",
+    "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+菠萝派）≈¥28.8"
+  }
+]

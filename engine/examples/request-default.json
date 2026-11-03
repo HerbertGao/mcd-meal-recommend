@@ -1,0 +1,62 @@
+{
+  "storeCode": "000000",
+  "beType": 1,
+  "orderType": 1,
+  "budgetFen": 3500,
+  "dining": "eat-in",
+  "mealPeriod": "lunch",
+  "prefs": {
+    "priority": [
+      "mcard_four",
+      "dual_1plus1",
+      "satiety",
+      "low_repeat",
+      "deal",
+      "drink"
+    ],
+    "satiety": "high",
+    "preferNewItems": false,
+    "lowRecentRepeat": true,
+    "requireCoffee": false,
+    "drink": {
+      "preferCodes": [
+        "522021",
+        "3071"
+      ],
+      "preferNameRegex": "无糖.*可乐",
+      "ice": "no_ice",
+      "iceKey": "0-0",
+      "iceCode": "200002"
+    },
+    "mealPeriod": "lunch"
+  },
+  "selection": {
+    "mode": "rank_then_random",
+    "topK": 5,
+    "random": "uniform",
+    "diversifyByMain": true,
+    "maxPerMainInTopK": 1,
+    "diversifyByFamily": true
+  },
+  "satiety": {
+    "requireMain": true,
+    "requireSideOrChicken": true,
+    "requireDrink": true,
+    "forbidDrinkOnlyCombo": true
+  },
+  "historyWindowDays": 5,
+  "history": [
+    {
+      "date": "2026-11-03",
+      "rotationKey": "sj1120+zl505416_pie4105",
+      "priceFen": 2880,
+      "mainCode": "1120"
+    }
+  ],
+  "candidateFamilies": [
+    "mcard_four",
+    "dual_1plus1",
+    "dabao"
+  ],
+  "profileId": "lunch"
+}

@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.mcd-lunch/schema/recommend-response.schema.json",
+  "title": "McdLunchRecommendResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "storeCode",
+    "items",
+    "priceFen",
+    "rotationKey",
+    "humanSummary"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "generatedAt": {
+      "type": "string",
+      "description": "ISO8601，Asia/Shanghai 偏移"
+    },
+    "storeCode": {
+      "type": "string"
+    },
+    "rotationKey": {
+      "type": "string"
+    },
+    "humanSummary": {
+      "type": "string"
+    },
+    "priceFen": {
+      "type": "integer"
+    },
+    "priceYuan": {
+      "type": "number"
+    },
+    "priceVerified": {
+      "type": "boolean",
+      "description": "是否已由调用方在当前流程用 calculate-price 校验；离线引擎始终输出 false"
+    },
+    "payableFen": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "calculate-price 返回的实付金额（含打包费与配送费）；外送未报价时为 null，不能当作已确定总价"
+    },
+    "needsQuoteBeforeConfirm": {
+      "type": "boolean",
+      "description": "true 表示外送总价尚未确认，确认前必须先调用 calculate-price"
+    },
+    "takeWayCodeHint": {
+      "type": "string",
+      "enum": [
+        "eat-in",
+        "take-in-store"
+      ]
+    },
+    "score": {
+      "type": "number"
+    },
+    "scoreBreakdown": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "rank": {
+      "type": "integer",
+      "description": "在当次全量排名中的位次（1-based）"
+    },
+    "topK": {
+      "type": "integer"
+    },
+    "selectionMode": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "productCode",
+          "quantity",
+          "roundList"
+        ],
+        "properties": {
+          "productCode": {
+            "type": "string"
+          },
+          "productName": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "couponId": {
+            "type": "string"
+          },
+          "couponCode": {
+            "type": "string"
+          },
+          "modification": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "key",
+                    "quantity"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "roundList": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "round",
+                "comboItemList"
+              ],
+              "properties": {
+                "round": {
+                  "type": "string",
+                  "description": "字符串化的 round.id"
+                },
+                "comboItemList": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "code",
+                      "quantity"
+                    ],
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      },
+                      "quantity": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "modification": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "values": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "code",
+                                "key",
+                                "quantity"
+                              ],
+                              "properties": {
+                                "code": {
+                                  "type": "string"
+                                },
+                                "key": {
+                                  "type": "string"
+                                },
+                                "quantity": {
+                                  "type": "integer",
+                                  "minimum": 1
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "可直接喂 calculate-price / create-order 的 items"
+    },
+    "alternates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "同批 Top-K 未抽中项摘要"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fallbackUsed": {
+      "type": "boolean",
+      "default": false
+    },
+    "phase": {
+      "type": "string",
+      "description": "phase0_template | phase1_scored 等"
+    },
+    "mealPeriod": {
+      "type": "string"
+    },
+    "profileId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mainCode": {
+      "description": "中选主食 code",
+      "type": "string"
+    },
+    "mainName": {
+      "description": "中选主食名（可得时）",
+      "type": "string"
+    },
+    "sideCode": {
+      "description": "中选小食 code",
+      "type": "string"
+    },
+    "sideName": {
+      "description": "中选小食名（可得时）",
+      "type": "string"
+    },
+    "seed": {
+      "description": "本次 RNG seed",
+      "type": "integer"
+    },
+    "isNew": {
+      "type": "boolean"
+    },
+    "newSignals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unseenMain": {
+      "type": "boolean"
+    },
+    "unseenSide": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "ok": true,
+  "generatedAt": "2026-11-03T12:23:54+08:00",
+  "storeCode": "000000",
+  "rotationKey": "t1450+zl505416_pie4105",
+  "humanSummary": "随心配1+1三件套（麦香鸡+小薯条+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+菠萝派）≈¥28.8",
+  "priceFen": 2880,
+  "priceYuan": 28.8,
+  "priceVerified": false,
+  "takeWayCodeHint": "eat-in",
+  "score": 84.55,
+  "scoreBreakdown": {
+    "deal": 22.74,
+    "satiety": 31.25,
+    "novelty": 4.17,
+    "low_repeat": 18.52,
+    "drink": 7.87
+  },
+  "rank": 1,
+  "topK": 5,
+  "selectionMode": "rank_then_random",
+  "items": [
+    {
+      "productCode": "9900016651",
+      "productName": "随心配1+1三件套!!!",
+      "quantity": 1,
+      "roundList": [
+        {
+          "round": "1",
+          "comboItemList": [
+            {
+              "code": "1450",
+              "quantity": 1,
+              "modification": {
+                "values": [
+                  {
+                    "code": "100136",
+                    "key": "0-1",
+                    "quantity": 1
+                  },
+                  {
+                    "code": "100168",
+                    "key": "0-1",
+                    "quantity": 1
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "round": "2",
+          "comboItemList": [
+            {
+              "code": "4800",
+              "quantity": 1
+            }
+          ]
+        },
+        {
+          "round": "3",
+          "comboItemList": [
+            {
+              "code": "522021",
+              "quantity": 1,
+              "modification": {
+                "values": [
+                  {
+                    "code": "200002",
+                    "key": "0-0",
+                    "quantity": 1
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "productCode": "9900016668",
+      "productName": "真有料随心配1+1",
+      "quantity": 1,
+      "roundList": [
+        {
+          "round": "1",
+          "comboItemList": [
+            {
+              "code": "505416",
+              "quantity": 1
+            }
+          ]
+        },
+        {
+          "round": "2",
+          "comboItemList": [
+            {
+              "code": "4105",
+              "quantity": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alternates": [
+    {
+      "rotationKey": "sj1120+zl505416_pie4106",
+      "score": 70.66,
+      "priceFen": 2880,
+      "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+香芋派）— 白区派种轮换，结构同已验证双1+1",
+      "rank": 2
+    }
+  ],
+  "warnings": [],
+  "fallbackUsed": false,
+  "phase": "phase1_scored"
+}

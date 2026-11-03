@@ -1,0 +1,321 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-03T12:13:30+08:00",
+  "storeCodeDefault": "000000",
+  "beType": 1,
+  "orderType": 1,
+  "budgetFenDefault": 3500,
+  "notes": [
+    "Phase0 手工模板，仅作 Skill 回退/演示；每日应先 query-meals 确认 productCode 仍在售",
+    "items 结构对齐 calculate-price；禁止本阶段 create-order",
+    "价格单位分；priceVerified 仅为历史计价标记，不代表当前可售或实付"
+  ],
+  "combos": [
+    {
+      "id": "dual11-sj-zl-pie4105",
+      "rotationKey": "sj1120+zl505416_pie4105",
+      "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+菠萝派）≈¥28.8",
+      "priceFen": 2880,
+      "priceVerified": true,
+      "verifiedAt": "2026-11-03T12:07:04+08:00",
+      "tags": [
+        "satiety",
+        "deal",
+        "default"
+      ],
+      "items": [
+        {
+          "productCode": "9900016655",
+          "productName": "双吉随心配1+1",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "1120",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "100141",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100202",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100212",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100214",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "102230",
+                        "key": "0-1",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "522021",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "200002",
+                        "key": "0-0",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "productCode": "9900016668",
+          "productName": "真有料随心配1+1",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "505416",
+                  "quantity": 1
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "4105",
+                  "quantity": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "triple11-mxj-zl-pie4105",
+      "rotationKey": "t1450+zl505416_pie4105",
+      "humanSummary": "随心配1+1三件套（麦香鸡+小薯条+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+菠萝派）≈¥28.8",
+      "priceFen": 2880,
+      "priceVerified": true,
+      "verifiedAt": "2026-11-03T12:07:21+08:00",
+      "tags": [
+        "satiety",
+        "deal",
+        "fries",
+        "rotation"
+      ],
+      "items": [
+        {
+          "productCode": "9900016651",
+          "productName": "随心配1+1三件套!!!",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "1450",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "100136",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100168",
+                        "key": "0-1",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "4800",
+                  "quantity": 1
+                }
+              ]
+            },
+            {
+              "round": "3",
+              "comboItemList": [
+                {
+                  "code": "522021",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "200002",
+                        "key": "0-0",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "productCode": "9900016668",
+          "productName": "真有料随心配1+1",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "505416",
+                  "quantity": 1
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "4105",
+                  "quantity": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dual11-sj-zl-pie4106",
+      "rotationKey": "sj1120+zl505416_pie4106",
+      "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（琵琶腿+香芋派）— 白区派种轮换，结构同已验证双1+1",
+      "priceFen": 2880,
+      "priceVerified": true,
+      "tags": [
+        "satiety",
+        "deal",
+        "rotation",
+        "pie_variant"
+      ],
+      "items": [
+        {
+          "productCode": "9900016655",
+          "productName": "双吉随心配1+1",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "1120",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "100141",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100202",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100212",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "100214",
+                        "key": "0-1",
+                        "quantity": 1
+                      },
+                      {
+                        "code": "102230",
+                        "key": "0-1",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "522021",
+                  "quantity": 1,
+                  "modification": {
+                    "values": [
+                      {
+                        "code": "200002",
+                        "key": "0-0",
+                        "quantity": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "productCode": "9900016668",
+          "productName": "真有料随心配1+1",
+          "quantity": 1,
+          "roundList": [
+            {
+              "round": "1",
+              "comboItemList": [
+                {
+                  "code": "505416",
+                  "quantity": 1
+                }
+              ]
+            },
+            {
+              "round": "2",
+              "comboItemList": [
+                {
+                  "code": "4106",
+                  "quantity": 1
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "verifiedAt": "2026-11-03T12:13:25+08:00",
+      "notes": "Phase0 当日二次计价确认 2880（香芋派白区）"
+    }
+  ]
+}

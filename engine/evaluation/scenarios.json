@@ -1,0 +1,90 @@
+[
+  {
+    "name": "baseline_rank_only",
+    "overrides": {},
+    "expect": {"ok": true, "mainCode": "1120", "fallbackUsed": false}
+  },
+  {
+    "name": "budget_exactly_2880",
+    "overrides": {"budgetFen": 2880},
+    "expect": {"ok": true, "priceFen": 2880}
+  },
+  {
+    "name": "budget_below_all_candidates",
+    "overrides": {"budgetFen": 2879},
+    "expect": {"ok": false}
+  },
+  {
+    "name": "recent_main_history_rotates",
+    "overrides": {
+      "history": [
+        {"date": "2999-01-01", "rotationKey": "previous", "mainCode": "1120"}
+      ],
+      "historyTracks": {
+        "mains": [
+          {"code": "1120", "name": "双层吉士汉堡", "at": "2999-01-01T12:00:00+08:00", "rotationKey": "previous"}
+        ],
+        "sides": []
+      }
+    },
+    "expect": {"ok": true, "mainCode": "1450"}
+  },
+  {
+    "name": "expired_main_history_is_neutral",
+    "overrides": {
+      "history": [
+        {"date": "2000-01-01", "rotationKey": "old", "mainCode": "1120"}
+      ],
+      "historyTracks": {
+        "mains": [
+          {"code": "1120", "name": "双层吉士汉堡", "at": "2000-01-01T12:00:00+08:00", "rotationKey": "old"}
+        ],
+        "sides": []
+      }
+    },
+    "expect": {"ok": true, "mainCode": "1120"}
+  },
+  {
+    "name": "top_k_one_is_deterministic",
+    "overrides": {"selection": {"topK": 1}},
+    "expect": {"ok": true, "mainCode": "1120", "topK": 1}
+  },
+  {
+    "name": "softmax_seed_is_valid",
+    "overrides": {
+      "selection": {"mode": "rank_then_random", "random": "softmax", "topK": 4}
+    },
+    "seed": 11,
+    "expect": {"ok": true, "selectionMode": "rank_then_random"}
+  },
+  {
+    "name": "breakfast_with_coffee_passes",
+    "overrides": {
+      "mealPeriod": "breakfast",
+      "prefs": {
+        "mealPeriod": "breakfast",
+        "priority": ["coffee", "satiety", "deal", "drink"],
+        "requireCoffee": true
+      }
+    },
+    "replaceCodes": {"522021": "507411"},
+    "expect": {"ok": true}
+  },
+  {
+    "name": "breakfast_without_coffee_fails",
+    "overrides": {
+      "mealPeriod": "breakfast",
+      "prefs": {
+        "mealPeriod": "breakfast",
+        "priority": ["coffee", "satiety", "deal", "drink"],
+        "requireCoffee": true
+      }
+    },
+    "expect": {"ok": false}
+  },
+  {
+    "name": "explicit_empty_candidates_fail_closed",
+    "overrides": {"candidates": []},
+    "expect": {"ok": false, "fallbackUsed": false}
+  }
+]

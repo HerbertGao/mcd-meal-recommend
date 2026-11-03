@@ -1,0 +1,89 @@
+{
+  "id": "breakfast",
+  "description": "EXAMPLE breakfast delivery reservation — copy to profiles/breakfast.json and fill store/beCode/address",
+  "dining": "delivery",
+  "storeCode": "YOUR_STORE_CODE",
+  "beCode": "YOUR_BE_CODE",
+  "beType": 2,
+  "orderType": 2,
+  "addressId": "YOUR_ADDRESS_ID",
+  "addressName": "YOUR_ADDRESS_LABEL",
+  "reservation": {
+    "enabled": true,
+    "time": "07:00",
+    "dayOffset": 1
+  },
+  "mealPeriod": "breakfast",
+  "budgetFen": 2000,
+  "historyWindowDays": 5,
+  "historyWindowPicks": 5,
+  "historyPath": "runs/history/breakfast.json",
+  "candidateFamilies": [
+    "coffee_combo",
+    "mcard_four"
+  ],
+  "prefs": {
+    "priority": [
+      "coffee",
+      "satiety",
+      "deal",
+      "novelty",
+      "low_repeat",
+      "drink",
+      "mcard_four"
+    ],
+    "satiety": "high",
+    "preferNewItems": true,
+    "lowRecentRepeat": true,
+    "requireCoffee": true,
+    "coffeePreferCodes": [
+      "520689",
+      "521327",
+      "507411",
+      "507368",
+      "520688",
+      "507409",
+      "507328"
+    ],
+    "drink": {
+      "preferCodes": [
+        "520689",
+        "521327",
+        "507411",
+        "507368",
+        "520688",
+        "507409",
+        "507328"
+      ],
+      "preferNameRegex": "(咖啡|美式|奶铁|拿铁|鲜萃)",
+      "ice": "no_ice",
+      "iceKey": "0-0",
+      "iceCode": "200002"
+    },
+    "newTagRegex": "(上新|全新|新升级|新品|首发)",
+    "newProductCodes": [],
+    "newMainCodes": [],
+    "unseenMainBoost": 1.22,
+    "unseenSideBoost": 1.12,
+    "unseenComboCap": 1.32
+  },
+  "selection": {
+    "mode": "rank_then_random",
+    "topK": 5,
+    "random": "uniform",
+    "diversifyByMain": true,
+    "maxPerMainInTopK": 1,
+    "diversifyByFamily": true
+  },
+  "satiety": {
+    "requireMain": true,
+    "requireSideOrChicken": false,
+    "requireDrink": true,
+    "forbidDrinkOnlyCombo": false
+  },
+  "paths": {
+    "menuSlim": "runs/query-meals-breakfast-delivery-slim.json",
+    "detailsDir": "runs/meal-details-breakfast",
+    "defaultOutput": "runs/request-breakfast-built.json"
+  }
+}

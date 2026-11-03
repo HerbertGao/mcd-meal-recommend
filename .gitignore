@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+engine/runs/history/
+engine/runs/*.json
+engine/runs/*.txt
+engine/runs/research/
+.env
+.venv/
+*.bak
+engine/profiles/lunch.json
+engine/profiles/breakfast.json
+engine/profiles/*.local.json

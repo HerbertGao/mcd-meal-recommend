@@ -1,0 +1,52 @@
+{
+  "storeCode": "000000",
+  "beType": 1,
+  "orderType": 1,
+  "budgetFen": 3500,
+  "dining": "eat-in",
+  "mealPeriod": "lunch",
+  "profileId": "offline-demo",
+  "prefs": {
+    "priority": [
+      "dual_1plus1",
+      "satiety",
+      "low_repeat",
+      "deal",
+      "drink"
+    ],
+    "satiety": "high",
+    "preferNewItems": false,
+    "lowRecentRepeat": true,
+    "requireCoffee": false,
+    "drink": {
+      "preferCodes": [
+        "522021"
+      ],
+      "preferNameRegex": "无糖.*可乐",
+      "ice": "no_ice",
+      "iceKey": "0-0",
+      "iceCode": "200002"
+    },
+    "mealPeriod": "lunch"
+  },
+  "selection": {
+    "mode": "rank_only",
+    "topK": 5,
+    "random": "uniform",
+    "diversifyByMain": true,
+    "maxPerMainInTopK": 1,
+    "diversifyByFamily": false
+  },
+  "satiety": {
+    "requireMain": true,
+    "requireSideOrChicken": true,
+    "requireDrink": true,
+    "forbidDrinkOnlyCombo": true
+  },
+  "history": [],
+  "historyWindowDays": 5,
+  "historyWindowPicks": 5,
+  "candidateFamilies": [
+    "dual_1plus1"
+  ]
+}

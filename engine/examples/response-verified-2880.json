@@ -1,0 +1,116 @@
+{
+  "ok": true,
+  "generatedAt": "2026-11-03T12:07:04+08:00",
+  "storeCode": "000000",
+  "rotationKey": "sj1120+zl505416_pie4105",
+  "humanSummary": "双吉1+1（双层吉士+无糖可乐大杯去冰）+ 真有料1+1（脆汁鸡琵琶腿+菠萝派）≈¥28.8，堂食。",
+  "priceFen": 2880,
+  "priceYuan": 28.8,
+  "priceVerified": true,
+  "takeWayCodeHint": "eat-in",
+  "score": 92,
+  "scoreBreakdown": {
+    "satiety": 30,
+    "deal": 35,
+    "budget": 15,
+    "rotation": 10,
+    "drinkMatch": 10
+  },
+  "rank": 1,
+  "topK": 5,
+  "selectionMode": "rank_then_random",
+  "items": [
+    {
+      "productCode": "9900016655",
+      "productName": "双吉随心配1+1",
+      "quantity": 1,
+      "roundList": [
+        {
+          "round": "1",
+          "comboItemList": [
+            {
+              "code": "1120",
+              "quantity": 1,
+              "modification": {
+                "values": [
+                  {
+                    "code": "100141",
+                    "key": "0-1",
+                    "quantity": 1
+                  },
+                  {
+                    "code": "100202",
+                    "key": "0-1",
+                    "quantity": 1
+                  },
+                  {
+                    "code": "100212",
+                    "key": "0-1",
+                    "quantity": 1
+                  },
+                  {
+                    "code": "100214",
+                    "key": "0-1",
+                    "quantity": 1
+                  },
+                  {
+                    "code": "102230",
+                    "key": "0-1",
+                    "quantity": 1
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "round": "2",
+          "comboItemList": [
+            {
+              "code": "522021",
+              "quantity": 1,
+              "modification": {
+                "values": [
+                  {
+                    "code": "200002",
+                    "key": "0-0",
+                    "quantity": 1
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "productCode": "9900016668",
+      "productName": "真有料随心配1+1",
+      "quantity": 1,
+      "roundList": [
+        {
+          "round": "1",
+          "comboItemList": [
+            {
+              "code": "505416",
+              "quantity": 1
+            }
+          ]
+        },
+        {
+          "round": "2",
+          "comboItemList": [
+            {
+              "code": "4105",
+              "quantity": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alternates": [],
+  "warnings": [],
+  "fallbackUsed": false,
+  "phase": "phase0_template"
+}

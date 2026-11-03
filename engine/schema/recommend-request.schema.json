@@ -1,0 +1,512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.mcd-lunch/schema/recommend-request.schema.json",
+  "title": "McdLunchRecommendRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "storeCode",
+    "beType",
+    "orderType",
+    "budgetFen",
+    "prefs",
+    "selection"
+  ],
+  "properties": {
+    "storeCode": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "门店编码；从 profile / overlay 读取（堂食为就餐门店，外送为可配送店）"
+    },
+    "beType": {
+      "type": "integer",
+      "enum": [
+        1,
+        2,
+        5,
+        6
+      ],
+      "description": "1=堂食到店，2=麦乐送等外送；读 profile.beType"
+    },
+    "orderType": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ],
+      "description": "1=到店，2=外送；读 profile.orderType"
+    },
+    "budgetFen": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "价格上限，单位分"
+    },
+    "dining": {
+      "type": "string",
+      "enum": [
+        "eat-in",
+        "take-in-store",
+        "delivery"
+      ],
+      "default": "eat-in"
+    },
+    "beCode": {
+      "type": "string",
+      "description": "外送/得来速业务编码；麦乐送来自 delivery-query-stores"
+    },
+    "addressId": {
+      "type": "string",
+      "description": "外送地址 ID（delivery-query-addresses）"
+    },
+    "addressLabel": {
+      "type": "string",
+      "description": "addressName 别名（兼容旧字段）"
+    },
+    "reservationDate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "物化后的预约 yyyy-MM-dd HH:mm；通常由 reservation 算出，overlay 可直接覆盖"
+    },
+    "reservationTime": {
+      "type": "string",
+      "description": "预约时刻 HH:mm（可由 reservation.time 物化；兼容旧扁平字段）"
+    },
+    "mealPeriod": {
+      "type": "string",
+      "enum": [
+        "lunch",
+        "breakfast",
+        "dinner",
+        "snack"
+      ],
+      "default": "lunch",
+      "description": "场景时段；与 prefs 一起驱动打分，新场景优先用 profiles/*.json"
+    },
+    "profileId": {
+      "type": "string",
+      "description": "可选：来自 profiles/<id>.json"
+    },
+    "candidateFamilies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "mcard_four",
+          "dual_1plus1",
+          "dabao",
+          "coffee_combo",
+          "classic_three"
+        ]
+      },
+      "description": "build_candidates 家族；也可由 prefs.priority 推断"
+    },
+    "prefs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "priority",
+        "drink"
+      ],
+      "properties": {
+        "priority": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "satiety",
+              "deal",
+              "novelty",
+              "low_repeat",
+              "drink",
+              "mcard_four",
+              "dual_1plus1",
+              "coffee",
+              "classic_three"
+            ]
+          },
+          "minItems": 1,
+          "description": "本餐偏好优先级，靠前权重更高"
+        },
+        "satiety": {
+          "type": "string",
+          "enum": [
+            "off",
+            "normal",
+            "high"
+          ],
+          "default": "high"
+        },
+        "preferNewItems": {
+          "type": "boolean",
+          "default": false
+        },
+        "lowRecentRepeat": {
+          "type": "boolean",
+          "default": true
+        },
+        "requireCoffee": {
+          "type": "boolean",
+          "default": false,
+          "description": "true 时硬过滤无咖啡组合（早餐 profile 默认开）"
+        },
+        "coffeePreferCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mealPeriod": {
+          "type": "string",
+          "enum": [
+            "lunch",
+            "breakfast",
+            "dinner",
+            "snack"
+          ]
+        },
+        "drink": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ice"
+          ],
+          "properties": {
+            "preferCodes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "preferNameRegex": {
+              "type": "string"
+            },
+            "ice": {
+              "type": "string",
+              "enum": [
+                "no_ice",
+                "standard",
+                "extra_ice",
+                "less_ice"
+              ],
+              "description": "no_ice=0-0 standard=0-1 extra_ice=0-2 less_ice=1-1"
+            },
+            "iceKey": {
+              "type": "string",
+              "description": "可选显式覆盖 ice 对应 selectedKey"
+            },
+            "iceCode": {
+              "type": "string",
+              "default": "200002"
+            }
+          }
+        },
+        "newTagRegex": {
+          "type": "string",
+          "description": "菜单 tags 匹配新品的正则；默认 上新|全新|新升级|新品|首发"
+        },
+        "newProductCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选：显式新品 productCode 列表（profile 配置，非 Skill）"
+        },
+        "newMainCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选：显式新品主食 code 列表"
+        },
+        "unseenMainBoost": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1.22,
+          "description": "近窗口未见主食抬权"
+        },
+        "unseenSideBoost": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1.12,
+          "description": "近窗口未见小食抬权"
+        },
+        "unseenComboCap": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1.32,
+          "description": "未见抬权后 low_repeat 维上限倍率"
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "topK"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "rank_then_random",
+            "rank_only"
+          ]
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+        "random": {
+          "type": "string",
+          "enum": [
+            "uniform",
+            "softmax"
+          ],
+          "default": "uniform"
+        },
+        "diversifyByMain": {
+          "type": "boolean",
+          "default": true
+        },
+        "maxPerMainInTopK": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "diversifyByFamily": {
+          "type": "boolean",
+          "description": "Top-K round-robin across mcard_four/dual_1plus1/classic_three/coffee_combo/dabao"
+        }
+      }
+    },
+    "satiety": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requireMain": {
+          "type": "boolean",
+          "default": true
+        },
+        "requireSideOrChicken": {
+          "type": "boolean",
+          "default": true
+        },
+        "requireDrink": {
+          "type": "boolean",
+          "default": true
+        },
+        "forbidDrinkOnlyCombo": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "date",
+          "rotationKey"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "rotationKey": {
+            "type": "string"
+          },
+          "priceFen": {
+            "type": "integer"
+          },
+          "mainCode": {
+            "type": "string",
+            "description": "主堡/主食 code，供 low_repeat 降权"
+          },
+          "sideCode": {
+            "type": "string",
+            "description": "小食 code（薯条/鸡块/派等），与 mainCode 分轨降权"
+          },
+          "mainName": {
+            "type": "string"
+          },
+          "sideName": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "description": "ISO8601 Asia/Shanghai；缺省则用 date"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "historyWindowDays": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5
+    },
+    "menuSnapshot": {
+      "type": "object",
+      "description": "可选：query-meals 精简快照，Phase1 脚本用"
+    },
+    "mealDetails": {
+      "type": "object",
+      "description": "可选：productCode→detail，Phase1 脚本用"
+    },
+    "candidates": {
+      "type": "array",
+      "description": "可选：预组好的候选组合；有则脚本优先对此打分，不再枚举/读 fallback",
+      "items": {
+        "type": "object",
+        "required": [
+          "items",
+          "rotationKey"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "rotationKey": {
+            "type": "string"
+          },
+          "humanSummary": {
+            "type": "string"
+          },
+          "listPriceFen": {
+            "type": "integer"
+          },
+          "priceFen": {
+            "type": "integer"
+          },
+          "priceVerified": {
+            "type": "boolean"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "productNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "historyWindowPicks": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5,
+      "description": "各轨近 N 次中选降权窗口（默认 5）；与 historyWindowDays 同时生效"
+    },
+    "historyPath": {
+      "type": "string",
+      "description": "历史文件路径；磁盘格式 version=2 含 mains[]/sides[]/entries[]"
+    },
+    "priceQuotes": {
+      "type": "object",
+      "description": "rotationKey → calculate-price 返回的 data。用于按实付价（含打包费/配送费及麦金卡优惠）判定预算；未提供时外送不计费减免，并标记 needsQuoteBeforeConfirm",
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "historyTracks": {
+      "type": "object",
+      "description": "运行时主食/小食分轨（通常由 history 文件加载，不必手写）",
+      "additionalProperties": false,
+      "properties": {
+        "mains": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "rotationKey": {
+                "type": "string"
+              },
+              "seed": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "sides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "rotationKey": {
+                "type": "string"
+              },
+              "seed": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "addressName": {
+      "type": "string",
+      "description": "外送地址名称或标签；与 addressLabel 同义，仅用于解析与展示"
+    },
+    "reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "预约配置；enabled=false 或不传表示即时单。引擎据此计算 reservationDate",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$",
+          "description": "预约时刻 HH:mm（Asia/Shanghai）"
+        },
+        "dayOffset": {
+          "type": "integer",
+          "description": "相对今天的天数偏移；早餐次日=1"
+        },
+        "date": {
+          "type": "string",
+          "description": "可选绝对日期 yyyy-MM-dd，覆盖 dayOffset"
+        }
+      }
+    }
+  }
+}

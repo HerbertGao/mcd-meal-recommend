@@ -1,0 +1,76 @@
+{
+  "storeCode": "000000",
+  "beType": 2,
+  "orderType": 2,
+  "budgetFen": 2000,
+  "dining": "delivery",
+  "mealPeriod": "breakfast",
+  "prefs": {
+    "priority": [
+      "coffee",
+      "satiety",
+      "deal",
+      "low_repeat",
+      "drink",
+      "mcard_four"
+    ],
+    "satiety": "high",
+    "preferNewItems": false,
+    "lowRecentRepeat": true,
+    "requireCoffee": true,
+    "coffeePreferCodes": [
+      "507411",
+      "507368",
+      "507409",
+      "507328",
+      "520688",
+      "521327"
+    ],
+    "drink": {
+      "preferCodes": [
+        "507411",
+        "507368",
+        "507409",
+        "507328",
+        "520688",
+        "521327"
+      ],
+      "preferNameRegex": "(咖啡|美式|奶铁|拿铁|鲜萃)",
+      "ice": "no_ice",
+      "iceKey": "0-0",
+      "iceCode": "200002"
+    },
+    "mealPeriod": "breakfast"
+  },
+  "selection": {
+    "mode": "rank_then_random",
+    "topK": 5,
+    "random": "uniform",
+    "diversifyByMain": true,
+    "maxPerMainInTopK": 1,
+    "diversifyByFamily": true
+  },
+  "satiety": {
+    "requireMain": true,
+    "requireSideOrChicken": true,
+    "requireDrink": true,
+    "forbidDrinkOnlyCombo": true
+  },
+  "historyWindowDays": 5,
+  "history": [],
+  "candidateFamilies": [
+    "coffee_combo",
+    "mcard_four"
+  ],
+  "profileId": "breakfast",
+  "beCode": "00000002",
+  "addressId": "YOUR_ADDRESS_ID",
+  "reservationDate": "2026-11-04 07:00",
+  "reservationTime": "07:00",
+  "addressName": "示例配送地址",
+  "reservation": {
+    "enabled": true,
+    "time": "07:00",
+    "dayOffset": 1
+  }
+}

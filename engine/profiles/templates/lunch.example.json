@@ -1,0 +1,75 @@
+{
+  "id": "lunch",
+  "description": "EXAMPLE lunch eat-in profile — copy to profiles/lunch.json and fill storeCode",
+  "dining": "eat-in",
+  "storeCode": "YOUR_STORE_CODE",
+  "beType": 1,
+  "orderType": 1,
+  "reservation": {
+    "enabled": false,
+    "time": "12:00",
+    "dayOffset": 0
+  },
+  "mealPeriod": "lunch",
+  "budgetFen": 3500,
+  "historyWindowDays": 5,
+  "historyWindowPicks": 5,
+  "historyPath": "runs/history/lunch.json",
+  "candidateFamilies": [
+    "mcard_four",
+    "dual_1plus1",
+    "dabao",
+    "classic_three"
+  ],
+  "prefs": {
+    "priority": [
+      "mcard_four",
+      "dual_1plus1",
+      "satiety",
+      "novelty",
+      "low_repeat",
+      "deal",
+      "classic_three",
+      "drink"
+    ],
+    "satiety": "high",
+    "preferNewItems": true,
+    "lowRecentRepeat": true,
+    "requireCoffee": false,
+    "drink": {
+      "preferCodes": [
+        "522021",
+        "3071"
+      ],
+      "preferNameRegex": "无糖.*可乐",
+      "ice": "no_ice",
+      "iceKey": "0-0",
+      "iceCode": "200002"
+    },
+    "newTagRegex": "(上新|全新|新升级|新品|首发)",
+    "newProductCodes": [],
+    "newMainCodes": [],
+    "unseenMainBoost": 1.22,
+    "unseenSideBoost": 1.12,
+    "unseenComboCap": 1.32
+  },
+  "selection": {
+    "mode": "rank_then_random",
+    "topK": 5,
+    "random": "uniform",
+    "diversifyByMain": true,
+    "maxPerMainInTopK": 1,
+    "diversifyByFamily": true
+  },
+  "satiety": {
+    "requireMain": true,
+    "requireSideOrChicken": true,
+    "requireDrink": true,
+    "forbidDrinkOnlyCombo": true
+  },
+  "paths": {
+    "menuSlim": "runs/query-meals-lunch-slim.json",
+    "detailsDir": "runs/meal-details",
+    "defaultOutput": "runs/request-lunch-built.json"
+  }
+}
