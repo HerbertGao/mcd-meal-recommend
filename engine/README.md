@@ -1,65 +1,72 @@
-# 麦当劳配餐推荐 — Phase0/1（可复用 profiles）
+# 配餐推荐引擎
 
-> 状态：**契约 / 模板 / profile / 只读打分与候选扩展**。不自动下单、不改例程、不 create-order / 领券。  
-> 读者：使用本引擎的开发者与调用方；主调用方：午餐 / 早餐 Skill 或例程。
+按 profile 生成候选、打分并选出推荐组合的离线引擎。脚本只读取本地 JSON 快照，不访问网络、不创建订单；实时菜单与算价由调用方通过 MCP 获取。
 
-## 复用原则
+## 设计约定
 
-**本地生活两个任务（午餐 / 早餐）只换筛选条件**：指定 `profiles/lunch.json` 或 `profiles/breakfast.json`（或传入 prefs JSON）。  
-**加新场景（如晚餐）**：复制一份 profile 改 `mealPeriod` / `prefs` / `candidateFamilies` / `budgetFen`，**不必改** `score_lunch.py` / `build_candidates.py` 核心逻辑。
+一个引擎服务多个用餐场景，差异全部落在 profile：场景参数（`mealPeriod`、`prefs`、`candidateFamilies`、`budgetFen`、履约字段）写在 `profiles/<name>.json`，核心逻辑不随场景分叉。新增场景时复制一份 profile 修改字段即可。
 
-核心脚本只认：
+引擎只识别以下入口键：
 
-- `mealPeriod`（lunch|breakfast|dinner|snack…）
-- `prefs.priority`（含 `mcard_four` / `dual_1plus1` / `coffee` / `satiety` / …）
-- `prefs.requireCoffee`、`drink`、`selection`
-- `candidateFamilies`（含 `classic_three`；或由 priority 推断）
+- `mealPeriod`：`lunch` / `breakfast` / `dinner` / `snack`
+- `prefs.priority`：软分维度排序，可含 `mcard_four` / `dual_1plus1` / `coffee` / `satiety`
+- `prefs.requireCoffee`、`prefs.drink`、`selection`
+- `candidateFamilies`：显式列出，或由 `prefs.priority` 推断
 
-不要在 Skill 里写死两套算法。
+### 新品信号
 
-**新品**：MCP `query-meals` / `query-meal-detail` **无** `isNew` 布尔字段；用菜单 `categories[].meals[].tags`（如「上新」「全新升级」）+ 名称启发式 + profile `prefs.newTagRegex` / `newProductCodes` / `newMainCodes` 抬 `novelty`。
+`query-meals` 与 `query-meal-detail` 都没有 `isNew` 布尔字段。`novelty` 维度的输入是菜单 `categories[].meals[].tags`（如「上新」「全新升级」）、名称启发式，以及 profile 的 `prefs.newTagRegex` / `newProductCodes` / `newMainCodes`。
 
-**主食规则**：麦乐鸡等鸡块/纯小食不得作为主食或双1+1 红区左腿；分类为 side，候选生成会跳过，打分硬门槛会淘汰「麦乐鸡当主」的组合。
+### 主食判定
 
-**经典三件套**：`classic_three` 从当日菜单动态发现「三件套 / 精选单人餐 / 汉堡·鱼套餐」，**只收标价≤`budgetFen`**（午餐默认 ¥35），用于补齐麦香鱼等优惠红区未覆盖的主堡；SKU 不写死进 Skill。
+鸡块类（如麦乐鸡）与纯炸鸡小食归为 `side`，不会作为主食生成候选；硬过滤另有 `nugget_forbidden_as_main` 兜底，避免它们成为双 1+1 的左腿。
+
+### 经典三件套
+
+`classic_three` 从当日菜单动态发现「三件套 / 精选单人餐 / 汉堡套餐」，只收标价不超过 `budgetFen` 的产品，用于补齐优惠红区未覆盖的主堡。产品码不写进配置。
 
 ## 目录
 
 ```
 engine/
-  profile_lib.py
+  profile_lib.py              # profile 解析、履约物化、历史读写
+  build_candidates.py         # 菜单 + detail → 候选组合
+  score_lunch.py              # 硬过滤、打分、选择、响应组装
+  mcp_contract.py             # MCP 快照校验与字段归一
+  budget.py                   # 堂食/外送预算口径
+  evaluate_recommendations.py # 固定场景回归评估
   profiles/
-    lunch.json                 # 午餐：麦金卡四件套 + 双1+1 + ≤预算经典三件套
-    breakfast.json             # 早餐：履约见 JSON（麦乐送预约+咖啡家族）；预算¥20
-  score_lunch.py               # 只读打分；--profile / --prefs-file / -i
-  build_candidates.py          # 按 families 扩候选；同样吃 --profile
+    README.md
+    templates/*.example.json  # 可提交的模板
+    <name>.json               # 真实履约参数，本地保留，不入库
   schema/recommend-request.schema.json
   schema/recommend-response.schema.json
-  examples/request-default.json
-  examples/request-breakfast-default.json
+  examples/fixtures/          # 合成 MCP 快照（menu / meal-details）
+  examples/*.json             # 请求与响应样例
+  evaluation/scenarios.json   # 评估场景
   templates/fallback-combos.json
-  runs/…                       # 当日菜单缓存 / 试跑
-  README.md
+  tests/
+  runs/                       # 运行期缓存与历史，不入库
 ```
 
-## Profile 字段（摘要）
+## Profile 字段
 
-履约参数**全部进 profile**（可用 `--prefs-file` overlay 覆盖）。Skill / 例程不要写死任何门店或 SKU。
+履约参数全部来自 profile，可被 `--prefs-file` 覆盖。
 
-### 履约（fulfillment）
+### 履约
 
 | 字段 | 含义 |
 |---|---|
-| `dining` | `eat-in` | `delivery`（也可 `take-in-store`） |
-| `storeCode` | 门店编码；外送时为可配送店，**不是**午餐堂食默认 |
-| `beCode` | 外送业务编码（`delivery-query-stores`）；堂食可省略 |
-| `beType` / `orderType` | 1=到店堂食，2=麦乐送外送 |
+| `dining` | `eat-in` / `take-in-store` / `delivery` |
+| `storeCode` | 门店编码；外送场景取可配送店，与堂食店码无关 |
+| `beCode` | 外送业务编码，来自 `delivery-query-stores`；堂食可省略 |
+| `beType` / `orderType` | 1 = 到店，2 = 麦乐送 |
 | `addressId` / `addressName` | 外送地址；`addressLabel` 为 `addressName` 别名 |
-| `reservation` | `{ enabled, time: "HH:mm", dayOffset }`；`profile_lib` 算 `reservationDate`（`yyyy-MM-dd HH:mm`，Asia/Shanghai） |
-| `reservationDate` | 物化结果；overlay 可直接盖；`enabled=false` 时不传 MCP |
-| `mealPeriod` | `breakfast` | `lunch` \| …；打分/硬过滤键 |
+| `reservation` | `{ enabled, time: "HH:mm", dayOffset }`，由 `profile_lib` 物化为 `reservationDate`（`yyyy-MM-dd HH:mm`，Asia/Shanghai） |
+| `reservationDate` | 物化结果，可被 overlay 直接覆盖；`enabled=false` 时不传 MCP |
+| `mealPeriod` | 打分与硬过滤的场景键 |
 | `budgetFen` | 价格上限（分） |
-| `candidateFamilies` | `mcard_four` `dual_1plus1` `dabao` `classic_three` `coffee_combo` |
+| `candidateFamilies` | `mcard_four` / `dual_1plus1` / `dabao` / `classic_three` / `coffee_combo` |
 
 打印履约摘要（不扩候选、不下单）：
 
@@ -67,85 +74,105 @@ engine/
 python3 profile_lib.py lunch breakfast
 ```
 
-### 其它
+### 偏好与选择
 
 | 字段 | 含义 |
 |---|---|
-| `prefs.priority` | 软分权重顺序；可含 `mcard_four` `dual_1plus1` `coffee` |
-| `prefs.requireCoffee` | true → 硬过滤无咖啡（早餐默认） |
-| `prefs.drink` | 饮料 code / 名称 / 冰量 |
-| `selection` | Top-K / `diversifyByMain` |
-| `history` / `historyPath` | 少重复；磁盘约定 `runs/history/<profile>.json`（v2：`mains[]`/`sides[]`/`entries[]`） |
-| `historyWindowPicks` | 各轨近 N 次（默认 5）；与 `historyWindowDays` 同时生效 |
-| `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenComboCap` | 窗口内未见主/小食抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.32） |
-| `prefs.familyRepeatPenalty` | 家族轮换因子，作用于总分：上一餐家族 ×该值、上上餐 ×其平方根（默认 0.55，1 关闭） |
-| `paths` | 默认 menu / details / output（相对本目录；**按 profile 店码命名**，勿写死） |
+| `prefs.priority` | 软分维度权重顺序 |
+| `prefs.requireCoffee` | true 时硬过滤无咖啡组合 |
+| `prefs.drink` | 饮料 code、名称正则、冰量 |
+| `selection.mode` | `rank_only` 取最高分；`rank_then_random` 在 Top-K 内抽取 |
+| `selection.topK` / `diversifyByMain` / `maxPerMainInTopK` / `diversifyByFamily` | 候选池构成 |
+| `history` / `historyPath` | 少重复；磁盘格式见下 |
+| `historyWindowPicks` / `historyWindowDays` | 各轨近 N 次、近 N 天，取交集；设为 0 关闭 |
+| `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenComboCap` | 窗口内未见主/小食的抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.32） |
+| `prefs.familyRepeatPenalty` | 家族轮换因子，作用于总分（默认 0.55，1 关闭） |
+| `paths` | 默认菜单、detail 目录与输出路径，相对 `engine/` |
 
 ## CLI
 
 ```bash
-# 从仓库根目录进入 engine
 cd engine
 
-# 1) 按 profile 扩候选（只读，用当日 meal-details + slim 菜单）
+# 扩候选（只读，输入当日 meal-details 与精简菜单）
 python3 build_candidates.py --profile lunch -o runs/request-lunch-built.json
 python3 build_candidates.py --profile breakfast -o runs/request-breakfast-built.json
 
-# 2) 打分（可复现）
+# 打分（固定 seed 可复现）
 python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json --seed 1 --pretty
-python3 score_lunch.py --profile breakfast -i runs/request-breakfast-built.json --seed 1 --pretty
 
-# 覆盖偏好而不改 profile 文件
+# 覆盖偏好而不改 profile
 python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
   --prefs-file /tmp/prefs-overlay.json --seed 2
 
-# 3) 主食/小食分轨历史：串行 10 轮，每轮中选后写入再打下一轮
+# 分轨历史：串行多轮，每轮记录中选项后再打下一轮
 python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
   --history-file runs/history/lunch.json --reset-history --record-pick \
   --seeds 1-10 --pretty
 ```
 
-**历史降权 + 未见抬权（默认）**：`historyWindowPicks=5`（按**餐次**计，一餐双堡会写入多条 code 但只占 1 次窗口）+ `historyWindowDays=5`。主食轨 / 小食轨分开记（互不交叉）：
-- **已选降权**：窗口内出现过的 code，距今越近降得越狠（`_recency_multiplier`）。
-- **未见抬权**：同一窗口**非空**且 code 从未出现 → 乘 `prefs.unseenMainBoost`（默认 1.22）/ `unseenSideBoost`（默认 1.12）；两轨可叠加，但 `low_repeat` 维不超过 `lr_cap × unseenComboCap`（默认 1.32）。
-- **空历史**：两轨都无餐 → **不抬**（全体中性），避免「全员同加」淹没其它维度。
-- 已选/未见对同一 code **互斥**，共用窗口，不双计。软分，不碰预算硬门槛。可与新品 `novelty` 叠加（不同维）。
+输出与退出码：
 
-`--record-pick` 追加 `{code,name,at}` 到对应轨并写 `entries`；双 1+1 会把组合内全部 main/side 都记上。
+- stdout 为 `RecommendResponse`，`items` 可直接交给外部调用方做 `calculate-price`
+- 离线引擎始终输出 `priceVerified=false`；输入中的历史验价标记不会被沿用
+- `payableFen` 为实付金额，外送未报价时为 `null`，并置 `needsQuoteBeforeConfirm=true`
+- 退出码：`0` 成功，`1` 无候选，`2` 输入错误或快照契约错误
+- 显式 `candidates=[]`、候选全部被过滤、或 fallback 门店不匹配时均不使用历史 fallback，失败响应 `items=[]`
 
-- stdout：`RecommendResponse`（含 `profileId` / `mealPeriod`；`items` 可交给外部调用方做 `calculate-price`）
-- 离线引擎始终输出 `priceVerified=false`；输入模板中的历史验价标记不会被沿用
-- 退出码：`0` ok，`1` 无候选，`2` 输入坏或 MCP 快照契约错误
-- 显式 `candidates=[]` 或候选全部被过滤时不使用历史 fallback；失败响应的 `items=[]`
+### 预算口径
 
-## 给 🍔本地生活
+堂食按商品价判定。外送实付含打包费与配送费，且两者是否减免取决于订单金额门槛与当期活动，因此：
 
-1. **先读 profile 履约字段**（`dining` / `storeCode` / `beCode` / `address*` / `reservation` / `mealPeriod` / `budgetFen` / `candidateFamilies`），例程 `--prefs-file` 仍可盖预算/地址/店码。  
-2. 午餐：`--profile lunch` → 从 profile 读取堂食门店、预算与候选家族。
-3. 早餐：`--profile breakfast` → 从 profile 读取麦乐送预约、地址、预算与候选家族。`query-meals` / detail / `calculate-price` 带物化后的 `reservationDate` + 外送参数；**不要**用午市堂食缓存。
-4. MCP 链路：`query-meals` → 按 `candidateFamilies` 拉 `query-meal-detail` → `build_candidates` → `score_lunch` → **`calculate-price`** → 对人确认 → 才 `create-order`（本仓库脚本禁止下单）。  
-5. 麦金卡会员身份问题在算价/下单错误时由本地生活处理。
+- 有报价时按 `payableFen` 判定，可产生 `over_budget_payable`
+- 无报价时仅当商品价已超预算才拒绝，否则放行但标记 `needsQuoteBeforeConfirm`
 
-## 推荐回归评估
+调用方可将 `calculate-price` 的结果按 `rotationKey` 回填到请求的 `priceQuotes`，引擎据此覆盖商品价并写入实付价。
 
-从仓库根目录运行 `python3 engine/evaluate_recommendations.py`。固定场景、指标与限制见 `../docs/recommendation-evaluation.md`。
+### 历史格式
 
-## 软分维度
+`runs/history/<profile>.json` 为 v2 文档：`mains[]`、`sides[]`、`entries[]`。`--record-pick` 会把组合内全部主食/小食写入对应轨，同时追加一条 `entries`。历史按追加顺序判断新旧——同一次运行可能写入相同时间戳。
 
-`deal` / `satiety` / `novelty` / `low_repeat` / `drink` / **`mcard_four`** / **`dual_1plus1`** / **`classic_three`** / **`coffee`**，按 `prefs.priority` 调权。  
-硬过滤：预算、饱腹、白区饮料去重；`requireCoffee` 时无咖啡直接剔除。  
-`low_repeat`：主食 code / 小食 code **分轨**读近期历史（见上）；整单 `rotationKey` 命中仍直接清零该维；窗口内未见主/小食对称抬权（`unseenMainBoost` / `unseenSideBoost`）。
+降权与抬权规则：
 
-**家族轮换**：`low_repeat` 只占一维，单靠它无法换家族——某家族即使被降权，其余维度仍足以让它继续中选。因此排序前对总分再乘一次家族因子：上一餐所属家族 ×`familyRepeatPenalty`，上上餐 ×其平方根。这样换小食规避惩罚的连锁套餐（如双 1+1）不会连续霸占推荐，大堡口福、经典三件套等才有机会轮到。
+- **已选降权**：窗口内出现过的 code，距当前越近降幅越大（`_recency_multiplier`）
+- **未见抬权**：窗口非空且 code 未出现时乘 `unseenMainBoost` / `unseenSideBoost`；两轨可叠加，但 `low_repeat` 不得超过 `lr_cap × unseenComboCap`
+- **空历史不抬权**，避免整体抬升淹没其它维度
+- 已选与未见对同一 code 互斥，不双计；两者均为软分，不影响预算硬门槛
 
-## 行为基线
+## 打分与选择
 
-- `engine/tests/` 的离线用例覆盖预算口径、`rank_only` 语义、历史窗口与菜单字段适配。
-- `engine/evaluate_recommendations.py` 用合成夹具跑固定场景；指标口径见 `../docs/recommendation-evaluation.md`。
-- 预算与召回的研究结论见 `../docs/mcp-budget-and-recall.md`。
+软分维度：`deal` / `satiety` / `novelty` / `low_repeat` / `drink` / `mcard_four` / `dual_1plus1` / `classic_three` / `coffee`，按 `prefs.priority` 重分配权重。
 
-## 禁令
+硬过滤：预算、饱腹结构（主食/小食/饮）、白区饮料去重、`requireCoffee`、鸡块不得作主食。
 
-- 不上独立 HTTP 服务；不把账号会话写入本目录  
-- 不改午餐/早餐 routine；本目录脚本 **禁止 create-order**  
-- 菜单日更：模板仅 fallback；主路径每日 `query-meals`
+### 家族轮换
+
+`low_repeat` 只占一个维度，单靠它无法改变家族归属：某家族即使被降权，其余维度仍足以让它继续中选，而且连锁套餐更换子项就会产生新的 `rotationKey`，绕开降权。
+
+因此排序前对总分再施加一次家族因子：上一餐所属家族乘 `familyRepeatPenalty`，上上餐家族乘其平方根。家族由 `rotationKey` 前缀判定，历史文件无需额外字段。
+
+`selection.mode=rank_only` 时直接取调整后的最高分；`rank_then_random` 在按家族轮转、主食去重后的 Top-K 池中抽取。
+
+## 调用方链路
+
+```text
+query-meals → query-meal-detail（按 candidateFamilies）
+  → build_candidates.py --profile <name>
+  → score_lunch.py --profile <name> -i <built>
+  → calculate-price
+  → 用户确认
+  → 外部调用方 create-order
+```
+
+- 预约场景需带物化后的 `reservationDate` 与外送参数；外送不要复用堂食菜单缓存
+- 会员资格导致的算价或下单失败由调用方处理，引擎不校验会员状态
+- 本仓库脚本禁止 `create-order`，也不提供常驻 HTTP 服务
+
+## 验证
+
+```bash
+python3 engine/evaluate_recommendations.py
+python -m unittest discover -s engine/tests -v
+```
+
+`engine/tests/` 覆盖预算口径、选择语义、历史窗口与菜单字段适配；评估场景与指标口径见 `../docs/recommendation-evaluation.md`，预算与召回的相关结论见 `../docs/mcp-budget-and-recall.md`，快照兼容规则见 `../docs/mcp-contract.md`。
