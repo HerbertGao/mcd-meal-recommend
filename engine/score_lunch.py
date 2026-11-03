@@ -774,6 +774,77 @@ def coffee_hits(cand: ScoredCandidate) -> List[str]:
 
 
 
+_FAMILY_PREFIXES = (
+    ("mk", "mcard_four"),
+    ("sj", "dual_1plus1"),
+    ("db", "dabao"),
+    ("ct", "classic_three"),
+    ("bf", "coffee_combo"),
+)
+
+
+def family_of_rotation_key(rk: str) -> str:
+    """Map a stored rotationKey to its family (history keeps no tags)."""
+    key = str(rk or "")
+    for prefix, family in _FAMILY_PREFIXES:
+        if key.startswith(prefix):
+            return family
+    return "other"
+
+
+def recent_meal_families(req: Dict[str, Any], limit: int = 3) -> List[str]:
+    """Families of the most recent meals, newest first.
+
+    History is appended chronologically, so insertion order is the reliable
+    ordering; timestamps can tie (several picks recorded in one run).
+    """
+    hist = req.get("history") or []
+    if not isinstance(hist, list) or not hist:
+        return []
+    out: List[str] = []
+    seen = set()
+    for h in reversed(hist):
+        if not isinstance(h, dict):
+            continue
+        key = (str(h.get("at") or h.get("date") or ""), str(h.get("rotationKey") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(family_of_rotation_key(str(h.get("rotationKey") or "")))
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+def apply_family_rotation(cands: List[ScoredCandidate], req: Dict[str, Any]) -> None:
+    """Make the most recently eaten family yield the seat to the others.
+
+    Scoring alone cannot rotate families: a stronger family keeps winning even
+    when its repeat dimension is penalised, because that dimension is only a
+    small share of the total. The factor is therefore applied to the total score
+    before ranking.
+    """
+    prefs = req.get("prefs") or {}
+    try:
+        factor = float(prefs.get("familyRepeatPenalty", 0.55))
+    except (TypeError, ValueError):
+        factor = 0.55
+    factor = max(0.05, min(1.0, factor))
+    if factor >= 1.0:
+        return
+    past_fams = recent_meal_families(req, limit=2)
+    if not past_fams:
+        return
+    for cand in cands:
+        fam = candidate_family(cand)
+        if fam == "other" or fam not in past_fams:
+            continue
+        age = past_fams.index(fam)
+        applied = factor if age == 0 else factor ** 0.5
+        cand.score *= applied
+        cand.meta["familyRotationFactor"] = round(applied, 3)
+
+
 def candidate_family(cand: ScoredCandidate) -> str:
     tags = set(cand.tags or [])
     if tags & {"mcard_four", "mcard", "four_piece"} or is_mcard_four(cand):
@@ -1066,6 +1137,9 @@ def score_candidate(cand: ScoredCandidate, req: Dict[str, Any]) -> None:
             if cand.meta["unseenMain"] or cand.meta["unseenSide"]:
                 lr_ceiling = lr_cap * unseen_combo_cap
                 cand.meta["unseenComboCap"] = round(unseen_combo_cap, 3)
+            # Family rotation is applied to the total score at ranking time
+            # (see apply_family_rotation); low_repeat stays component-level.
+
     bd["low_repeat"] = round(max(0.0, min(lr_ceiling, lr)), 2)
 
     # --- drink ---
@@ -1803,6 +1877,7 @@ def run(req: Dict[str, Any], seed: Optional[int] = None) -> Tuple[Dict[str, Any]
             req, warnings + ["all candidates failed hard filters"], fallback_used=fallback_used
         ), []
 
+    apply_family_rotation(passed, req)
     ranked = sorted(passed, key=lambda c: (-c.score, c.price_fen, c.rotation_key))
     rng = random.Random(seed)
     pick, alts, mode = select_from_ranked(ranked, req, rng)

@@ -78,6 +78,7 @@ python3 profile_lib.py lunch breakfast
 | `history` / `historyPath` | 少重复；磁盘约定 `runs/history/<profile>.json`（v2：`mains[]`/`sides[]`/`entries[]`） |
 | `historyWindowPicks` | 各轨近 N 次（默认 5）；与 `historyWindowDays` 同时生效 |
 | `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenComboCap` | 窗口内未见主/小食抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.32） |
+| `prefs.familyRepeatPenalty` | 家族轮换因子，作用于总分：上一餐家族 ×该值、上上餐 ×其平方根（默认 0.55，1 关闭） |
 | `paths` | 默认 menu / details / output（相对本目录；**按 profile 店码命名**，勿写死） |
 
 ## CLI
@@ -134,6 +135,8 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 `deal` / `satiety` / `novelty` / `low_repeat` / `drink` / **`mcard_four`** / **`dual_1plus1`** / **`classic_three`** / **`coffee`**，按 `prefs.priority` 调权。  
 硬过滤：预算、饱腹、白区饮料去重；`requireCoffee` 时无咖啡直接剔除。  
 `low_repeat`：主食 code / 小食 code **分轨**读近期历史（见上）；整单 `rotationKey` 命中仍直接清零该维；窗口内未见主/小食对称抬权（`unseenMainBoost` / `unseenSideBoost`）。
+
+**家族轮换**：`low_repeat` 只占一维，单靠它无法换家族——某家族即使被降权，其余维度仍足以让它继续中选。因此排序前对总分再乘一次家族因子：上一餐所属家族 ×`familyRepeatPenalty`，上上餐 ×其平方根。这样换小食规避惩罚的连锁套餐（如双 1+1）不会连续霸占推荐，大堡口福、经典三件套等才有机会轮到。
 
 ## 行为基线
 

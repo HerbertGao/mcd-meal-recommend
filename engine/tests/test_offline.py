@@ -289,6 +289,94 @@ class OfflineContractTest(unittest.TestCase):
         self.assertIn("mealIndex", normalized)
         self.assertEqual(normalized["mealIndex"]["9900016670"]["currentPrice"], "29.9")
 
+    def test_family_rotation_key_mapping(self):
+        cases = {
+            "mk0884_522032_4810": "mcard_four",
+            "sj1120+zl505416_w4105": "dual_1plus1",
+            "db6670_1100_4810": "dabao",
+            "ct4064_1440_4810": "classic_three",
+            "bf3360_521315_900479": "coffee_combo",
+            "unknown": "other",
+        }
+        for key, family in cases.items():
+            with self.subTest(key=key):
+                self.assertEqual(score_lunch.family_of_rotation_key(key), family)
+
+    def test_recent_meal_families_follows_insertion_order(self):
+        # Several picks can share one timestamp; append order is the truth.
+        request = {
+            "history": [
+                {"date": "2026-01-01", "at": "2026-01-01T12:00:00+08:00", "rotationKey": "mk0001_a"},
+                {"date": "2026-01-01", "at": "2026-01-01T12:00:00+08:00", "rotationKey": "sj0002_b"},
+            ]
+        }
+        self.assertEqual(
+            score_lunch.recent_meal_families(request, limit=2),
+            ["dual_1plus1", "mcard_four"],
+        )
+
+    def test_family_rotation_lets_another_family_win(self):
+        def cand(key, score, tag, main):
+            return score_lunch.ScoredCandidate(
+                rotation_key=key,
+                human_summary=key,
+                price_fen=2800,
+                items=[],
+                tags=[tag],
+                score=score,
+                meta={"primaryMainCode": main},
+            )
+
+        strong = cand("mk0001_a", 60.0, "mcard_four", "522032")
+        weaker = cand("db0002_b", 40.0, "dabao", "1100")
+        cands = [strong, weaker]
+        request = {
+            "prefs": {"familyRepeatPenalty": 0.55},
+            "history": [{"date": "2026-01-01", "rotationKey": "mk0001_a"}],
+        }
+        score_lunch.apply_family_rotation(cands, request)
+        ranked = sorted(cands, key=lambda c: -c.score)
+        self.assertEqual(ranked[0].rotation_key, "db0002_b")
+        self.assertEqual(strong.meta.get("familyRotationFactor"), 0.55)
+
+    def test_shipped_profiles_use_rank_only(self):
+        # Uniform random over a family-interleaved pool can surface a far
+        # lower-scoring candidate, so the shipped profiles pick by rank.
+        for name in ("lunch.example.json", "breakfast.example.json"):
+            with self.subTest(name=name):
+                profile = load(ENGINE / "profiles" / "templates" / name)
+                self.assertEqual(profile["selection"]["mode"], "rank_only")
+
+    def test_rank_only_beats_family_pool_decoy(self):
+        import random as _random
+
+        def cand(key, score, main, tag):
+            return score_lunch.ScoredCandidate(
+                rotation_key=key,
+                human_summary=key,
+                price_fen=2800,
+                items=[],
+                tags=[tag],
+                score=score,
+                meta={"primaryMainCode": main},
+            )
+
+        strong = cand("strong", 65.0, "522032", "dual11")
+        decoy = cand("decoy", 33.5, "1440", "classic_three")
+        ranked = sorted([strong, decoy], key=lambda c: -c.score)
+        request = {
+            "selection": {
+                "mode": "rank_only",
+                "topK": 5,
+                "diversifyByFamily": True,
+                "diversifyByMain": True,
+            },
+            "candidateFamilies": ["classic_three", "dual_1plus1"],
+            "prefs": {"priority": ["classic_three", "dual_1plus1"]},
+        }
+        pick, _, _ = score_lunch.select_from_ranked(ranked, request, _random.Random(3))
+        self.assertEqual(pick.rotation_key, "strong")
+
     def test_documented_examples_match_schemas(self):
         for name in (
             "request-default.json",

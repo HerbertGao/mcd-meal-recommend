@@ -68,7 +68,7 @@
     "unseenComboCap": 1.32
   },
   "selection": {
-    "mode": "rank_then_random",
+    "mode": "rank_only",
     "topK": 5,
     "random": "uniform",
     "diversifyByMain": true,

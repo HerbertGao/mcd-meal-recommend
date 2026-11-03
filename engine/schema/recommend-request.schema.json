@@ -237,6 +237,13 @@
           "minimum": 1,
           "default": 1.32,
           "description": "未见抬权后 low_repeat 维上限倍率"
+        },
+        "familyRepeatPenalty": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1,
+          "default": 0.55,
+          "description": "家族轮换因子：作用于总分，上一餐所属家族的候选乘以该系数（上上餐取其平方根），1 表示关闭。避免单一家族（如双 1+1）靠更换子项反复中选"
         }
       }
     },
