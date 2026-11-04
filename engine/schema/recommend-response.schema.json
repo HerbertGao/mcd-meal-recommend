@@ -246,12 +246,34 @@
       "type": "string"
     },
     "sideCode": {
-      "description": "中选小食 code",
+      "description": "中选的第一份小食 code。降权会看 sideCodes 里的每一项",
       "type": "string"
     },
     "sideName": {
       "description": "中选小食名（可得时）",
       "type": "string"
+    },
+    "sideCodes": {
+      "description": "组合内全部小食 code",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "drinkCode": {
+      "description": "中选的第一杯饮品 code",
+      "type": "string"
+    },
+    "drinkName": {
+      "description": "中选饮品名（可得时）",
+      "type": "string"
+    },
+    "drinkCodes": {
+      "description": "组合内全部饮品 code",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "seed": {
       "description": "本次 RNG seed",
@@ -270,6 +292,9 @@
       "type": "boolean"
     },
     "unseenSide": {
+      "type": "boolean"
+    },
+    "unseenDrink": {
       "type": "boolean"
     }
   },

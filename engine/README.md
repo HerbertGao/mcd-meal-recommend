@@ -25,6 +25,15 @@
 
 `classic_three` 从当日菜单动态发现「三件套 / 精选单人餐 / 汉堡套餐」，只收标价不超过 `budgetFen` 的产品，用于补齐优惠红区未覆盖的主堡。产品码不写进配置。
 
+### 套餐可选项
+
+候选按「先主食，再小食，再饮品」展开。主食、小食、饮品都来自该套餐 `query-meal-detail` 的轮次，不把某一组小食或某一杯饮品写成唯一默认值。
+
+- 麦金卡四件套：主食轮定堡，接着枚举各小食轮的有效组合，再枚举饮品轮。同一主食在菜单给出多组小食、多种饮品且未超预算时，会留下多组候选。
+- 大堡口福、经典三件套、双 1+1、早餐咖啡套餐同样从对应轮次枚举，并用预算截断。
+- `prefs.preferSideCodes` 与 `prefs.drink.preferCodes` 只影响截断时的排序。列表非空时仍会给非偏好项留位置，避免把整轮锁死。模板里 `preferSideCodes` 为空数组。
+- 麦乐鸡可以出现在小食轮，不能作为主食。
+
 ## 目录
 
 ```
@@ -80,12 +89,13 @@ python3 profile_lib.py lunch breakfast
 |---|---|
 | `prefs.priority` | 软分维度权重顺序 |
 | `prefs.requireCoffee` | true 时硬过滤无咖啡组合 |
-| `prefs.drink` | 饮料 code、名称正则、冰量 |
+| `prefs.drink` | 饮料 code、名称正则、冰量。`preferCodes` 是软排序，不是唯一饮品 |
+| `prefs.preferSideCodes` | 小食软排序；空数组表示不额外偏好，仍枚举菜单小食轮 |
 | `selection.mode` | `rank_only` 取最高分；`rank_then_random` 在 Top-K 内抽取 |
 | `selection.topK` / `diversifyByMain` / `maxPerMainInTopK` / `diversifyByFamily` | 候选池构成 |
 | `history` / `historyPath` | 少重复；磁盘格式见下 |
 | `historyWindowPicks` / `historyWindowDays` | 各轨近 N 次、近 N 天，取交集；设为 0 关闭 |
-| `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenComboCap` | 窗口内未见主/小食的抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.32） |
+| `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenDrinkBoost` / `unseenComboCap` | 窗口内未见主食、小食、饮品的抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.12 / 1.32） |
 | `prefs.familyRepeatPenalty` | 家族轮换因子，作用于总分（默认 0.55，1 关闭） |
 | `paths` | 默认菜单、detail 目录与输出路径，相对 `engine/` |
 
@@ -130,12 +140,14 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 
 ### 历史格式
 
-`runs/history/<profile>.json` 为 v2 文档：`mains[]`、`sides[]`、`entries[]`。`--record-pick` 会把组合内全部主食/小食写入对应轨，同时追加一条 `entries`。历史按追加顺序判断新旧——同一次运行可能写入相同时间戳。
+`runs/history/<profile>.json` 为 v2 文档：`mains[]`、`sides[]`、`drinks[]`、`entries[]`。`--record-pick` 会把组合内全部主食、小食和饮品写入对应轨，同时追加一条 `entries`。历史按追加顺序判断新旧——同一次运行可能写入相同时间戳。
 
 降权与抬权规则：
 
 - **已选降权**：窗口内出现过的 code，距当前越近降幅越大（`_recency_multiplier`）
-- **未见抬权**：窗口非空且 code 未出现时乘 `unseenMainBoost` / `unseenSideBoost`；两轨可叠加，但 `low_repeat` 不得超过 `lr_cap × unseenComboCap`
+- **小食和饮品看整单**：四件套里的第二份小食、以及饮品轮选出的饮品码，都参与各自轨道的降权。不只看 `primarySideCode`，也不只看 `preferCodes`
+- 同一轨有多个 code 时只取最强的一次降权，不把两份小食的系数相乘
+- **未见抬权**：窗口非空且该轨仍有未见 code 时乘对应系数；每轨最多抬一次。主食、小食、饮品可同时抬，但 `low_repeat` 不得超过 `lr_cap × unseenComboCap`
 - **空历史不抬权**，避免整体抬升淹没其它维度
 - 已选与未见对同一 code 互斥，不双计；两者均为软分，不影响预算硬门槛
 

@@ -177,7 +177,8 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "description": "饮品软偏好顺序。候选仍从套餐饮品 round 枚举，不用该列表锁死唯一饮品"
             },
             "preferNameRegex": {
               "type": "string"
@@ -230,7 +231,13 @@
           "type": "number",
           "minimum": 1,
           "default": 1.12,
-          "description": "近窗口未见小食抬权"
+          "description": "近窗口未见小食抬权。组合里任一侧小食未见即抬一次，不按个数连乘"
+        },
+        "unseenDrinkBoost": {
+          "type": "number",
+          "minimum": 1,
+          "default": 1.12,
+          "description": "近窗口未见饮品抬权，口径与未见小食相同"
         },
         "unseenComboCap": {
           "type": "number",
@@ -244,6 +251,13 @@
           "maximum": 1,
           "default": 0.55,
           "description": "家族轮换因子：作用于总分，上一餐所属家族的候选乘以该系数（上上餐取其平方根），1 表示关闭。避免单一家族（如双 1+1）靠更换子项反复中选"
+        },
+        "preferSideCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "小食软偏好顺序。只影响候选截断时的排序，不排除菜单 round 里的其他小食；空数组表示不额外偏好"
         }
       }
     },
@@ -341,10 +355,31 @@
             "type": "string",
             "description": "小食 code（薯条/鸡块/派等），与 mainCode 分轨降权"
           },
+          "drinkCode": {
+            "type": "string",
+            "description": "饮品 code。与小食分轨；同单其余饮品放 extraDrinkCodes"
+          },
+          "extraSideCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "同单除 sideCode 外的小食 code，参与小食轨降权"
+          },
+          "extraDrinkCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "同单除 drinkCode 外的饮品 code，参与饮品轨降权"
+          },
           "mainName": {
             "type": "string"
           },
           "sideName": {
+            "type": "string"
+          },
+          "drinkName": {
             "type": "string"
           },
           "at": {
@@ -464,6 +499,30 @@
         },
         "sides": {
           "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "rotationKey": {
+                "type": "string"
+              },
+              "seed": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "drinks": {
+          "type": "array",
+          "description": "近期饮品轨，降权口径与 sides 相同",
           "items": {
             "type": "object",
             "properties": {

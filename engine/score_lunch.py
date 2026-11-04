@@ -534,11 +534,69 @@ def codes_by_role(cand: ScoredCandidate, role: str) -> List[Tuple[str, str]]:
 
 def primary_side_code(cand: ScoredCandidate) -> str:
     """First side-classified combo code (薯条/鸡块/派/新地等)."""
+    explicit = [str(c) for c in (cand.meta.get("sideCodes") or []) if c]
+    if explicit:
+        return explicit[0]
     for code, ci in iter_combo_items(cand.items):
         name = str((ci or {}).get("name") or (ci or {}).get("productName") or "")
         if classify_code(code, name) == "side":
             return str(code)
     return ""
+
+
+def _explicit_codes(cand: ScoredCandidate, key: str) -> List[str]:
+    raw = cand.meta.get(key)
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    seen = set()
+    for code in raw:
+        c = str(code or "")
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def side_codes_of(cand: ScoredCandidate) -> List[str]:
+    """Every side code in the combo, not only the first slot."""
+    explicit = _explicit_codes(cand, "sideCodes")
+    if explicit:
+        return explicit
+    return [code for code, _name in codes_by_role(cand, "side")]
+
+
+def drink_codes_of(cand: ScoredCandidate) -> List[str]:
+    """Every drink code in the combo. Prefer list is not a substitute."""
+    explicit = _explicit_codes(cand, "drinkCodes")
+    if explicit:
+        return explicit
+    return drink_codes_in(cand)
+
+
+def _strongest_recency(
+    codes: Sequence[str],
+    recent: List[Tuple[str, int]],
+    *,
+    floor: float,
+    ceiling: float,
+) -> float:
+    """Lowest (strongest) per-code multiplier. Unseen codes stay 1.0 and do not stack.
+
+    同一轨里两份小食或两杯饮品只取最近的那一次降权，避免玉米+麦乐鸡被乘两次。
+    """
+    if not codes or not recent:
+        return 1.0
+    return min(
+        _recency_multiplier(code, recent, floor=floor, ceiling=ceiling) for code in codes
+    )
+
+
+def _unseen_codes(codes: Sequence[str], recent: List[Tuple[str, int]]) -> List[str]:
+    if not codes or not recent:
+        return []
+    seen = {code for code, _age in recent}
+    return [code for code in codes if code not in seen]
 
 
 def _code_display_name(code: str, cand: Optional[ScoredCandidate] = None) -> str:
@@ -558,29 +616,44 @@ def _track_from_req(req: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
         return [x for x in tracks[key] if isinstance(x, dict)]
     # derive from flat entries
     hist = req.get("history") or []
+    fields = {
+        "mains": ("mainCode", "mainName", "extraMainCodes"),
+        "sides": ("sideCode", "sideName", "extraSideCodes"),
+        "drinks": ("drinkCode", "drinkName", "extraDrinkCodes"),
+    }
+    spec = fields.get(key)
+    if spec is None:
+        return []
+    field, name_field, extra_field = spec
     out: List[Dict[str, Any]] = []
-    field = "mainCode" if key == "mains" else "sideCode"
-    name_field = "mainName" if key == "mains" else "sideName"
     for h in hist:
         if not isinstance(h, dict):
             continue
-        code = str(h.get(field) or "")
-        if not code and key == "mains":
+        codes: List[str] = []
+        primary = str(h.get(field) or "")
+        if not primary and key == "mains":
             # legacy parse rotationKey for main only
             rk = str(h.get("rotationKey") or "")
             m = re.search(r"(?:sj|t)(\d{3,6})", rk)
             if m:
-                code = m.group(1)
-        if not code:
-            continue
-        out.append(
-            {
-                "code": code,
-                "name": str(h.get(name_field) or ""),
-                "at": str(h.get("at") or h.get("date") or ""),
-                "rotationKey": str(h.get("rotationKey") or ""),
-            }
-        )
+                primary = m.group(1)
+        if primary:
+            codes.append(primary)
+        extra = h.get(extra_field) or []
+        if isinstance(extra, list):
+            for code in extra:
+                c = str(code or "")
+                if c and c not in codes:
+                    codes.append(c)
+        for code in codes:
+            out.append(
+                {
+                    "code": code,
+                    "name": str(h.get(name_field) or "") if code == primary else "",
+                    "at": str(h.get("at") or h.get("date") or ""),
+                    "rotationKey": str(h.get("rotationKey") or ""),
+                }
+            )
     return out
 
 
@@ -654,6 +727,10 @@ def recent_main_codes(req: Dict[str, Any]) -> set:
 
 def recent_side_codes(req: Dict[str, Any]) -> set:
     return {c for c, _ in recent_track_codes(req, "sides")}
+
+
+def recent_drink_codes(req: Dict[str, Any]) -> set:
+    return {c for c, _ in recent_track_codes(req, "drinks")}
 
 
 def _recency_multiplier(code: str, recent: List[Tuple[str, int]], *, floor: float, ceiling: float) -> float:
@@ -1072,43 +1149,47 @@ def score_candidate(cand: ScoredCandidate, req: Dict[str, Any]) -> None:
         nov = nov * (0.55 + 0.45 * main_mult_nov)
     bd["novelty"] = round(min(nov_cap, max(0.0, nov)), 2)
 
-    # --- low_repeat (main track + side track, independent) ---
+    # --- low_repeat (main / side / drink tracks, independent) ---
     # Defaults: last historyWindowPicks=5 on each track, filtered by historyWindowDays=5.
-    # Same rotationKey → 0; same main recent → strong cut; same side recent → milder cut.
-    # Symmetric unseen boost: code absent from the SAME meal-window → soft lift
+    # Same rotationKey → 0; same main recent → strong cut; any side or drink in the
+    # combo that was recent → milder cut (strongest code on that track, not only the first).
+    # Symmetric unseen boost: a code absent from the SAME meal-window → soft lift
     # (only when that track's window is non-empty; empty history stays neutral so
     # every candidate does not get an identical bump). Seen-penalty and unseen-boost
-    # are mutually exclusive per code; mains/sides never cross.
-    # Soft only — never overrides budget / satiety hard filters. Stacks with novelty
-    # via separate dims; within this dim, prefs.unseenComboCap caps the lift.
+    # are mutually exclusive per code; mains/sides/drinks never cross.
+    # One boost per track even if several codes are unseen. Soft only.
     lr_cap = weights["low_repeat"]
     lr = lr_cap
     main_code = primary_main_code(cand)
-    side_code = primary_side_code(cand)
+    side_codes = side_codes_of(cand)
+    drink_codes = drink_codes_of(cand)
+    side_code = side_codes[0] if side_codes else primary_side_code(cand)
     cand.meta["primaryMainCode"] = canonical_main_code(main_code)
     cand.meta["primarySideCode"] = side_code
-    try:
-        unseen_main_boost = float(prefs.get("unseenMainBoost") or 1.22)
-    except (TypeError, ValueError):
-        unseen_main_boost = 1.22
-    try:
-        unseen_side_boost = float(prefs.get("unseenSideBoost") or 1.12)
-    except (TypeError, ValueError):
-        unseen_side_boost = 1.12
-    try:
-        unseen_combo_cap = float(prefs.get("unseenComboCap") or 1.32)
-    except (TypeError, ValueError):
-        unseen_combo_cap = 1.32
-    unseen_main_boost = max(1.0, min(1.5, unseen_main_boost))
-    unseen_side_boost = max(1.0, min(1.4, unseen_side_boost))
-    unseen_combo_cap = max(1.0, min(1.6, unseen_combo_cap))
+    cand.meta["sideCodes"] = side_codes
+    cand.meta["drinkCodes"] = drink_codes
+    cand.meta["primaryDrinkCode"] = drink_codes[0] if drink_codes else ""
+
+    def _boost(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            value = float(prefs.get(key) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(lo, min(hi, value))
+
+    unseen_main_boost = _boost("unseenMainBoost", 1.22, 1.0, 1.5)
+    unseen_side_boost = _boost("unseenSideBoost", 1.12, 1.0, 1.4)
+    unseen_drink_boost = _boost("unseenDrinkBoost", 1.12, 1.0, 1.4)
+    unseen_combo_cap = _boost("unseenComboCap", 1.32, 1.0, 1.6)
     cand.meta["unseenMain"] = False
     cand.meta["unseenSide"] = False
+    cand.meta["unseenDrink"] = False
     lr_ceiling = lr_cap
     if prefs.get("lowRecentRepeat", True):
         recent = recent_rotation_keys(req)
         main_recent = recent_track_codes(req, "mains")
         side_recent = recent_track_codes(req, "sides")
+        drink_recent = recent_track_codes(req, "drinks")
         if cand.rotation_key in recent:
             lr = 0.0
         else:
@@ -1119,22 +1200,31 @@ def score_candidate(cand: ScoredCandidate, req: Dict[str, Any]) -> None:
                     lr = lr_cap * 0.55
                     break
             main_mult = _recency_multiplier(main_code, main_recent, floor=0.12, ceiling=0.55)
-            side_mult = _recency_multiplier(side_code, side_recent, floor=0.28, ceiling=0.80)
-            lr = lr * main_mult * side_mult
+            side_mult = _strongest_recency(side_codes, side_recent, floor=0.28, ceiling=0.80)
+            drink_mult = _strongest_recency(drink_codes, drink_recent, floor=0.28, ceiling=0.80)
+            lr = lr * main_mult * side_mult * drink_mult
             cand.meta["repeatMainMult"] = round(main_mult, 3)
             cand.meta["repeatSideMult"] = round(side_mult, 3)
+            cand.meta["repeatDrinkMult"] = round(drink_mult, 3)
             # Unseen lift: only when the track window has meals (else neutral).
             main_seen = {c for c, _ in main_recent}
-            side_seen = {c for c, _ in side_recent}
             if main_recent and main_code and main_code not in main_seen:
                 lr *= unseen_main_boost
                 cand.meta["unseenMain"] = True
                 cand.meta["unseenMainBoost"] = round(unseen_main_boost, 3)
-            if side_recent and side_code and side_code not in side_seen:
+            unseen_sides = _unseen_codes(side_codes, side_recent)
+            if unseen_sides:
                 lr *= unseen_side_boost
                 cand.meta["unseenSide"] = True
+                cand.meta["unseenSideCodes"] = unseen_sides
                 cand.meta["unseenSideBoost"] = round(unseen_side_boost, 3)
-            if cand.meta["unseenMain"] or cand.meta["unseenSide"]:
+            unseen_drinks = _unseen_codes(drink_codes, drink_recent)
+            if unseen_drinks:
+                lr *= unseen_drink_boost
+                cand.meta["unseenDrink"] = True
+                cand.meta["unseenDrinkCodes"] = unseen_drinks
+                cand.meta["unseenDrinkBoost"] = round(unseen_drink_boost, 3)
+            if cand.meta["unseenMain"] or cand.meta["unseenSide"] or cand.meta["unseenDrink"]:
                 lr_ceiling = lr_cap * unseen_combo_cap
                 cand.meta["unseenComboCap"] = round(unseen_combo_cap, 3)
             # Family rotation is applied to the total score at ranking time
@@ -1272,6 +1362,12 @@ def candidates_from_request(req: Dict[str, Any]) -> Tuple[List[ScoredCandidate],
             meta = {}
             if c.get("primaryMainCode"):
                 meta["primaryMainCode"] = str(c["primaryMainCode"])
+            if isinstance(c.get("sideCodes"), list):
+                meta["sideCodes"] = [str(x) for x in c["sideCodes"] if x]
+            elif c.get("primarySideCode"):
+                meta["sideCodes"] = [str(c["primarySideCode"])]
+            if isinstance(c.get("drinkCodes"), list):
+                meta["drinkCodes"] = [str(x) for x in c["drinkCodes"] if x]
             if c.get("mcardFour") or any(pc in MCARD_FOUR_CODES for pc in pcodes):
                 meta["mcardFour"] = True
             quote = _quote_for(rk, req)
@@ -1756,7 +1852,14 @@ def build_response(
     )
     top_k = int((req.get("selection") or {}).get("topK") or 5)
     main_code = str(pick.meta.get("primaryMainCode") or primary_main_code(pick) or "")
-    side_code = str(pick.meta.get("primarySideCode") or primary_side_code(pick) or "")
+    side_codes = [str(c) for c in (pick.meta.get("sideCodes") or []) if c]
+    if not side_codes:
+        side_codes = [c for c, _name in codes_by_role(pick, "side")]
+    side_code = str(pick.meta.get("primarySideCode") or (side_codes[0] if side_codes else "") or "")
+    drink_codes = [str(c) for c in (pick.meta.get("drinkCodes") or []) if c]
+    if not drink_codes:
+        drink_codes = drink_codes_in(pick)
+    drink_code = str(pick.meta.get("primaryDrinkCode") or (drink_codes[0] if drink_codes else "") or "")
     return {
         "ok": True,
         "generatedAt": now_cst_iso(),
@@ -1775,10 +1878,15 @@ def build_response(
         "mainName": _code_display_name(main_code, pick),
         "sideCode": side_code,
         "sideName": _code_display_name(side_code, pick),
+        "sideCodes": side_codes,
+        "drinkCode": drink_code,
+        "drinkName": _code_display_name(drink_code, pick),
+        "drinkCodes": drink_codes,
         "isNew": bool(pick.meta.get("newSignals")),
         "newSignals": list(pick.meta.get("newSignals") or []),
         "unseenMain": bool(pick.meta.get("unseenMain")),
         "unseenSide": bool(pick.meta.get("unseenSide")),
+        "unseenDrink": bool(pick.meta.get("unseenDrink")),
         "score": pick.score,
         "scoreBreakdown": pick.breakdown,
         "rank": rank,
@@ -1894,10 +2002,14 @@ def run(req: Dict[str, Any], seed: Optional[int] = None) -> Tuple[Dict[str, Any]
             "humanSummary": c.human_summary,
             "mainCode": str(c.meta.get("primaryMainCode") or primary_main_code(c) or ""),
             "sideCode": str(c.meta.get("primarySideCode") or primary_side_code(c) or ""),
+            "sideCodes": list(c.meta.get("sideCodes") or []),
+            "drinkCode": str(c.meta.get("primaryDrinkCode") or ""),
+            "drinkCodes": list(c.meta.get("drinkCodes") or []),
             "newSignals": list(c.meta.get("newSignals") or []),
             "novelty": (c.breakdown or {}).get("novelty"),
             "unseenMain": bool(c.meta.get("unseenMain")),
             "unseenSide": bool(c.meta.get("unseenSide")),
+            "unseenDrink": bool(c.meta.get("unseenDrink")),
             "lowRepeat": (c.breakdown or {}).get("low_repeat"),
         }
         for i, c in enumerate(ranked)
@@ -1982,6 +2094,7 @@ def apply_history_file(req: Dict[str, Any], history_file: Optional[str]) -> Dict
             req["historyTracks"] = {
                 "mains": list(doc.get("mains") or []),
                 "sides": list(doc.get("sides") or []),
+                "drinks": list(doc.get("drinks") or []),
             }
         return req
     req["historyPath"] = path
@@ -1990,6 +2103,7 @@ def apply_history_file(req: Dict[str, Any], history_file: Optional[str]) -> Dict
     req["historyTracks"] = {
         "mains": list(doc.get("mains") or []),
         "sides": list(doc.get("sides") or []),
+        "drinks": list(doc.get("drinks") or []),
     }
     return req
 
@@ -2039,6 +2153,7 @@ def record_response_pick(req: Dict[str, Any], resp: Dict[str, Any], seed: Option
     items = resp.get("items") or []
     extra_mains: List[Tuple[str, str]] = []
     extra_sides: List[Tuple[str, str]] = []
+    extra_drinks: List[Tuple[str, str]] = []
     if items:
         tmp = ScoredCandidate(
             rotation_key=str(resp.get("rotationKey") or ""),
@@ -2048,16 +2163,36 @@ def record_response_pick(req: Dict[str, Any], resp: Dict[str, Any], seed: Option
         )
         extra_mains = codes_by_role(tmp, "main")
         extra_sides = codes_by_role(tmp, "side")
+        seen_drinks = []
+        for code in drink_codes_in(tmp):
+            if code not in seen_drinks:
+                seen_drinks.append(code)
+                extra_drinks.append((code, ""))
+        for code, name in codes_by_role(tmp, "drink"):
+            if code not in seen_drinks:
+                seen_drinks.append(code)
+                extra_drinks.append((code, name))
+    for code in resp.get("sideCodes") or []:
+        if str(code) and str(code) not in [c for c, _n in extra_sides]:
+            extra_sides.append((str(code), ""))
+    for code in resp.get("drinkCodes") or []:
+        if str(code) and str(code) not in [c for c, _n in extra_drinks]:
+            extra_drinks.append((str(code), ""))
     primary_main = str(resp.get("mainCode") or (extra_mains[0][0] if extra_mains else ""))
     primary_side = str(resp.get("sideCode") or (extra_sides[0][0] if extra_sides else ""))
+    primary_drink = str(resp.get("drinkCode") or (extra_drinks[0][0] if extra_drinks else ""))
     main_name = str(resp.get("mainName") or "")
     side_name = str(resp.get("sideName") or "")
+    drink_name = str(resp.get("drinkName") or "")
     for c, n in extra_mains:
         if c == primary_main and n and not main_name:
             main_name = n
     for c, n in extra_sides:
         if c == primary_side and n and not side_name:
             side_name = n
+    for c, n in extra_drinks:
+        if c == primary_drink and n and not drink_name:
+            drink_name = n
     doc = append_history_pick(
         str(path),
         rotation_key=str(resp.get("rotationKey") or ""),
@@ -2066,6 +2201,8 @@ def record_response_pick(req: Dict[str, Any], resp: Dict[str, Any], seed: Option
         main_name=main_name,
         side_code=primary_side,
         side_name=side_name,
+        drink_code=primary_drink,
+        drink_name=drink_name,
         seed=seed,
     )
     # additional mains/sides in same pick (e.g. dual 1+1 second burger) — same timestamp
@@ -2097,20 +2234,36 @@ def record_response_pick(req: Dict[str, Any], resp: Dict[str, Any], seed: Option
                 **({"seed": int(seed)} if seed is not None else {}),
             }
         )
+    for c, n in extra_drinks:
+        if c == primary_drink:
+            continue
+        doc.setdefault("drinks", []).append(
+            {
+                "code": c,
+                "name": n,
+                "at": at,
+                "rotationKey": str(resp.get("rotationKey") or ""),
+                **({"seed": int(seed)} if seed is not None else {}),
+            }
+        )
     # also list extra codes on the flat entry
     if doc.get("entries"):
         ent = doc["entries"][-1]
         extras_m = [c for c, _ in extra_mains if c != primary_main]
         extras_s = [c for c, _ in extra_sides if c != primary_side]
+        extras_d = [c for c, _ in extra_drinks if c != primary_drink]
         if extras_m:
             ent["extraMainCodes"] = extras_m
         if extras_s:
             ent["extraSideCodes"] = extras_s
+        if extras_d:
+            ent["extraDrinkCodes"] = extras_d
     save_history_doc(str(path), doc)
     req["history"] = list(doc.get("entries") or [])
     req["historyTracks"] = {
         "mains": list(doc.get("mains") or []),
         "sides": list(doc.get("sides") or []),
+        "drinks": list(doc.get("drinks") or []),
     }
 
 

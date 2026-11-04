@@ -377,6 +377,305 @@ class OfflineContractTest(unittest.TestCase):
         pick, _, _ = score_lunch.select_from_ranked(ranked, request, _random.Random(3))
         self.assertEqual(pick.rotation_key, "strong")
 
+    def test_mcard_four_enumerates_menu_side_pairs_and_drinks(self):
+        from build_candidates import expand_mcard_four
+
+        def choice(code, name, diff="+¥0.00"):
+            return {"code": code, "name": name, "diffPrice": diff}
+
+        detail = {
+            "name": "酥酥多笋卷四件套",
+            "rounds": [
+                {
+                    "id": "1",
+                    "name": "主食",
+                    "choices": [
+                        choice("1100", "巨无霸"),
+                        choice("1440", "麦辣鸡腿堡"),
+                        choice("1401", "麦乐鸡5块"),
+                    ],
+                },
+                {
+                    "id": "2",
+                    "name": "小食",
+                    "choices": [
+                        choice("4810", "中薯条"),
+                        choice("4437", "玉米杯"),
+                    ],
+                },
+                {
+                    "id": "3",
+                    "name": "小食",
+                    "choices": [
+                        choice("515106", "麦乐鸡4块"),
+                        choice("4105", "菠萝派"),
+                    ],
+                },
+                {
+                    "id": "4",
+                    "name": "饮料",
+                    "choices": [
+                        choice("522021", "无糖可口可乐大杯"),
+                        choice("3050", "雪碧中杯"),
+                        choice("3060", "芬达中杯"),
+                        choice("3110", "橙汁"),
+                        choice("3071", "无糖可乐中杯"),
+                        choice("522020", "可口可乐"),
+                    ],
+                },
+            ],
+        }
+        menu = {
+            "mealIndex": {
+                "9900000884": {"name": "酥酥多笋卷四件套", "currentPrice": 28},
+            }
+        }
+        cands = expand_mcard_four(
+            {"9900000884": detail},
+            menu,
+            ["522021"],
+            "0-0",
+            False,
+            budget_fen=3500,
+            prefer_sides=["4810"],
+        )
+        self.assertTrue(cands)
+        mains = []
+        for cand in cands:
+            main = cand["primaryMainCode"]
+            if not mains or mains[-1] != main:
+                mains.append(main)
+        self.assertEqual(mains, ["1100", "1440"])
+        self.assertNotIn("1401", {c["primaryMainCode"] for c in cands})
+
+        for_main = [c for c in cands if c["primaryMainCode"] == "1100"]
+        pairs = {tuple(c["sideCodes"]) for c in for_main}
+        drinks = {c["drinkCodes"][0] for c in for_main}
+        self.assertIn(("4810", "515106"), pairs)
+        self.assertIn(("4437", "4105"), pairs)
+        self.assertGreater(len(pairs), 1)
+        self.assertIn("522021", drinks)
+        self.assertGreater(len(drinks), 1)
+        self.assertTrue(drinks - {"522021"})
+        menu_drinks = {"522021", "3050", "3060", "3110", "3071", "522020"}
+        self.assertTrue(drinks <= menu_drinks)
+        sample = for_main[0]
+        self.assertEqual(
+            [rnd["round"] for rnd in sample["items"][0]["roundList"]],
+            ["1", "2", "3", "4"],
+        )
+
+    def test_mcard_four_budget_drops_expensive_side_and_drink(self):
+        from build_candidates import expand_mcard_four
+
+        def choice(code, name, diff="+¥0.00"):
+            return {"code": code, "name": name, "diffPrice": diff}
+
+        detail = {
+            "name": "人气超值四件套随心选",
+            "rounds": [
+                {"id": "a", "name": "主食", "choices": [choice("1100", "巨无霸")]},
+                {"id": "b", "name": "小食", "choices": [choice("4810", "中薯条")]},
+                {
+                    "id": "c",
+                    "name": "小食",
+                    "choices": [
+                        choice("515106", "麦乐鸡4块"),
+                        choice("4438", "大玉米杯", "+¥5.00"),
+                    ],
+                },
+                {
+                    "id": "d",
+                    "name": "饮料",
+                    "choices": [
+                        choice("3050", "雪碧中杯"),
+                        choice("520688", "大杯鲜萃咖啡", "+¥6.00"),
+                    ],
+                },
+            ],
+        }
+        menu = {"mealIndex": {"9900004236": {"name": detail["name"], "currentPrice": 28}}}
+        cands = expand_mcard_four(
+            {"9900004236": detail},
+            menu,
+            ["520688"],
+            "0-0",
+            False,
+            budget_fen=3000,
+        )
+        self.assertTrue(cands)
+        self.assertTrue(all(c["listPriceFen"] <= 3000 for c in cands))
+        self.assertTrue(all("4438" not in c["sideCodes"] for c in cands))
+        self.assertTrue(all(c["drinkCodes"] == ["3050"] for c in cands))
+        self.assertIn("515106", cands[0]["sideCodes"])
+
+    def test_recent_second_side_and_drink_downweight(self):
+        from build_candidates import expand_mcard_four
+
+        def choice(code, name, diff="+¥0.00"):
+            return {"code": code, "name": name, "diffPrice": diff}
+
+        detail = {
+            "name": "酥酥多笋卷四件套",
+            "rounds": [
+                {"id": "1", "name": "主食", "choices": [choice("1100", "巨无霸")]},
+                {"id": "2", "name": "小食", "choices": [choice("4810", "中薯条"), choice("4437", "玉米杯")]},
+                {"id": "3", "name": "小食", "choices": [choice("515106", "麦乐鸡4块"), choice("4105", "菠萝派")]},
+                {"id": "4", "name": "饮料", "choices": [choice("522021", "无糖可乐"), choice("3050", "雪碧")]},
+            ],
+        }
+        menu = {"mealIndex": {"9900000884": {"name": detail["name"], "currentPrice": 28}}}
+        raws = expand_mcard_four(
+            {"9900000884": detail},
+            menu,
+            ["522021"],
+            "0-0",
+            False,
+            budget_fen=3500,
+        )
+        target = next(
+            c
+            for c in raws
+            if c["sideCodes"] == ["4810", "515106"] and c["drinkCodes"] == ["3050"]
+        )
+
+        def score_with(history_tracks=None, history=None, drink_codes=None):
+            meta = {
+                "primaryMainCode": target["primaryMainCode"],
+                "sideCodes": list(target["sideCodes"]),
+                "drinkCodes": list(drink_codes or target["drinkCodes"]),
+                "mcardFour": True,
+            }
+            cand = score_lunch.ScoredCandidate(
+                rotation_key=target["rotationKey"] + "-".join(meta["drinkCodes"]),
+                human_summary=target["humanSummary"],
+                price_fen=target["listPriceFen"],
+                items=target["items"],
+                tags=list(target["tags"]),
+                meta=meta,
+            )
+            req = {
+                "budgetFen": 3500,
+                "mealPeriod": "lunch",
+                "dining": "eat-in",
+                "history": history or [],
+                "historyWindowDays": 5,
+                "historyWindowPicks": 5,
+                "prefs": {
+                    "priority": ["low_repeat", "satiety", "deal", "drink"],
+                    "satiety": "high",
+                    "lowRecentRepeat": True,
+                    "drink": {"ice": "no_ice", "preferCodes": ["522021"]},
+                    "unseenSideBoost": 1.12,
+                    "unseenDrinkBoost": 1.12,
+                    "unseenMainBoost": 1.0,
+                    "unseenComboCap": 1.6,
+                },
+            }
+            if history_tracks is not None:
+                req["historyTracks"] = history_tracks
+            score_lunch.score_candidate(cand, req)
+            return cand
+
+        at = "2026-11-04T12:00:00+08:00"
+        base = score_with(history_tracks={"mains": [], "sides": [], "drinks": []})
+        second_side = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [{"code": "515106", "at": at, "rotationKey": "prev-side"}],
+                "drinks": [],
+            }
+        )
+        self.assertEqual(second_side.meta["primarySideCode"], "4810")
+        self.assertLess(second_side.meta["repeatSideMult"], 1)
+        self.assertLess(second_side.breakdown["low_repeat"], base.breakdown["low_repeat"])
+
+        both_sides_seen = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [
+                    {"code": "4810", "at": at, "rotationKey": "prev-side"},
+                    {"code": "515106", "at": at, "rotationKey": "prev-side"},
+                ],
+                "drinks": [],
+            }
+        )
+        self.assertFalse(both_sides_seen.meta["unseenSide"])
+        fresh_sides = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [{"code": "4105", "at": at, "rotationKey": "prev-other"}],
+                "drinks": [],
+            }
+        )
+        self.assertTrue(fresh_sides.meta["unseenSide"])
+        self.assertIn("515106", fresh_sides.meta["unseenSideCodes"])
+
+        repeated_drink = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [],
+                "drinks": [{"code": "3050", "at": at, "rotationKey": "prev-drink"}],
+            }
+        )
+        self.assertLess(repeated_drink.meta["repeatDrinkMult"], 1)
+        self.assertFalse(repeated_drink.meta["unseenDrink"])
+        self.assertLess(repeated_drink.breakdown["low_repeat"], base.breakdown["low_repeat"])
+
+        other_drink = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [],
+                "drinks": [{"code": "522021", "at": at, "rotationKey": "prev-cola"}],
+            }
+        )
+        self.assertTrue(other_drink.meta["unseenDrink"])
+        self.assertEqual(other_drink.meta["repeatDrinkMult"], 1)
+
+        second_drink = score_with(
+            history_tracks={
+                "mains": [],
+                "sides": [],
+                "drinks": [{"code": "3050", "at": at, "rotationKey": "prev-sprite"}],
+            },
+            drink_codes=["522021", "3050"],
+        )
+        self.assertEqual(second_drink.meta["primaryDrinkCode"], "522021")
+        self.assertLess(second_drink.meta["repeatDrinkMult"], 1)
+
+        derived = score_lunch.recent_track_codes(
+            {
+                "historyWindowDays": 5,
+                "historyWindowPicks": 5,
+                "history": [
+                    {
+                        "date": "2026-11-04",
+                        "at": at,
+                        "rotationKey": "prev",
+                        "drinkCode": "522021",
+                        "extraDrinkCodes": ["3050"],
+                        "sideCode": "4810",
+                        "extraSideCodes": ["515106"],
+                    }
+                ],
+            },
+            "drinks",
+        )
+        self.assertEqual({code for code, _age in derived}, {"522021", "3050"})
+
+    def test_example_profiles_document_soft_prefs_without_personal_data(self):
+        gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("engine/profiles/lunch.json", gi)
+        self.assertEqual(list((ENGINE / "profiles").glob("*.json")), [])
+        for name in ("lunch.example.json", "breakfast.example.json"):
+            profile = load(ENGINE / "profiles" / "templates" / name)
+            self.assertEqual(profile["storeCode"], "YOUR_STORE_CODE")
+            self.assertEqual(profile["prefs"]["preferSideCodes"], [])
+            self.assertEqual(profile["prefs"]["unseenDrinkBoost"], 1.12)
+            request = load(EXAMPLES / "request-offline.json")
+            request["prefs"] = profile["prefs"]
+            validate(request, "recommend-request.schema.json")
+
     def test_documented_examples_match_schemas(self):
         for name in (
             "request-default.json",

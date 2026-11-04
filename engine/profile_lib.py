@@ -65,8 +65,8 @@ def resolve_history_path(path: Optional[str]) -> Optional[Path]:
 
 
 def empty_history_doc() -> Dict[str, Any]:
-    """Canonical on-disk history: mains/sides tracks + flat entries."""
-    return {"version": 2, "mains": [], "sides": [], "entries": []}
+    """Canonical on-disk history: mains/sides/drinks tracks + flat entries."""
+    return {"version": 2, "mains": [], "sides": [], "drinks": [], "entries": []}
 
 
 def _entry_at_iso(entry: Dict[str, Any]) -> str:
@@ -115,13 +115,25 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
                         "rotationKey": entry["rotationKey"],
                     }
                 )
+            drink_code = str(h.get("drinkCode") or "")
+            if drink_code:
+                doc["drinks"].append(
+                    {
+                        "code": drink_code,
+                        "name": str(h.get("drinkName") or ""),
+                        "at": entry["at"] or entry["date"],
+                        "rotationKey": entry["rotationKey"],
+                    }
+                )
+                entry["drinkCode"] = drink_code
         return doc
     if not isinstance(data, dict):
         return doc
-    if "version" in data or "mains" in data or "sides" in data or "entries" in data:
+    if "version" in data or "mains" in data or "sides" in data or "drinks" in data or "entries" in data:
         doc["version"] = int(data.get("version") or 2)
         doc["mains"] = [dict(x) for x in (data.get("mains") or []) if isinstance(x, dict)]
         doc["sides"] = [dict(x) for x in (data.get("sides") or []) if isinstance(x, dict)]
+        doc["drinks"] = [dict(x) for x in (data.get("drinks") or []) if isinstance(x, dict)]
         doc["entries"] = [
             dict(x)
             for x in (data.get("entries") or data.get("history") or [])
@@ -143,17 +155,46 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
                 )
         if not doc["sides"]:
             for h in doc["entries"]:
+                codes = []
                 sc = str(h.get("sideCode") or "")
-                if not sc:
-                    continue
-                doc["sides"].append(
-                    {
-                        "code": sc,
-                        "name": str(h.get("sideName") or ""),
-                        "at": _entry_at_iso(h) or str(h.get("date") or ""),
-                        "rotationKey": str(h.get("rotationKey") or ""),
-                    }
-                )
+                if sc:
+                    codes.append(sc)
+                extra = h.get("extraSideCodes") or []
+                if isinstance(extra, list):
+                    for code in extra:
+                        c = str(code or "")
+                        if c and c not in codes:
+                            codes.append(c)
+                for sc in codes:
+                    doc["sides"].append(
+                        {
+                            "code": sc,
+                            "name": str(h.get("sideName") or "") if sc == str(h.get("sideCode") or "") else "",
+                            "at": _entry_at_iso(h) or str(h.get("date") or ""),
+                            "rotationKey": str(h.get("rotationKey") or ""),
+                        }
+                    )
+        if not doc["drinks"]:
+            for h in doc["entries"]:
+                codes = []
+                dc = str(h.get("drinkCode") or "")
+                if dc:
+                    codes.append(dc)
+                extra = h.get("extraDrinkCodes") or []
+                if isinstance(extra, list):
+                    for code in extra:
+                        c = str(code or "")
+                        if c and c not in codes:
+                            codes.append(c)
+                for dc in codes:
+                    doc["drinks"].append(
+                        {
+                            "code": dc,
+                            "name": str(h.get("drinkName") or "") if dc == str(h.get("drinkCode") or "") else "",
+                            "at": _entry_at_iso(h) or str(h.get("date") or ""),
+                            "rotationKey": str(h.get("rotationKey") or ""),
+                        }
+                    )
         return doc
     # unknown dict → try nested
     return normalize_history_doc(data.get("history") or data.get("entries") or [])
@@ -180,6 +221,7 @@ def save_history_doc(path: str, doc: Dict[str, Any]) -> Path:
         "version": int(doc.get("version") or 2),
         "mains": list(doc.get("mains") or []),
         "sides": list(doc.get("sides") or []),
+        "drinks": list(doc.get("drinks") or []),
         "entries": list(doc.get("entries") or []),
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -195,6 +237,8 @@ def append_history_pick(
     main_name: str = "",
     side_code: str = "",
     side_name: str = "",
+    drink_code: str = "",
+    drink_name: str = "",
     at: Optional[str] = None,
     seed: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -212,6 +256,7 @@ def append_history_pick(
         "priceFen": int(price_fen or 0),
         "mainCode": str(main_code or ""),
         "sideCode": str(side_code or ""),
+        "drinkCode": str(drink_code or ""),
     }
     if seed is not None:
         entry["seed"] = int(seed)
@@ -219,6 +264,8 @@ def append_history_pick(
         entry["mainName"] = main_name
     if side_name:
         entry["sideName"] = side_name
+    if drink_name:
+        entry["drinkName"] = drink_name
     doc.setdefault("entries", []).append(entry)
     if main_code:
         doc.setdefault("mains", []).append(
@@ -235,6 +282,16 @@ def append_history_pick(
             {
                 "code": str(side_code),
                 "name": str(side_name or ""),
+                "at": now,
+                "rotationKey": str(rotation_key or ""),
+                **({"seed": int(seed)} if seed is not None else {}),
+            }
+        )
+    if drink_code:
+        doc.setdefault("drinks", []).append(
+            {
+                "code": str(drink_code),
+                "name": str(drink_name or ""),
                 "at": now,
                 "rotationKey": str(rotation_key or ""),
                 **({"seed": int(seed)} if seed is not None else {}),
@@ -470,6 +527,7 @@ def profile_to_request(profile: Dict[str, Any], overlay: Optional[Dict[str, Any]
         req["historyTracks"] = {
             "mains": deepcopy(doc.get("mains") or []),
             "sides": deepcopy(doc.get("sides") or []),
+            "drinks": deepcopy(doc.get("drinks") or []),
         }
         if profile.get("historyPath"):
             req["historyPath"] = profile["historyPath"]
@@ -482,6 +540,7 @@ def profile_to_request(profile: Dict[str, Any], overlay: Optional[Dict[str, Any]
             req["historyTracks"] = {
                 "mains": deepcopy(doc.get("mains") or []),
                 "sides": deepcopy(doc.get("sides") or []),
+                "drinks": deepcopy(doc.get("drinks") or []),
             }
     # pass-through builder hints (ignored by schema consumers that strip unknown)
     if "candidateFamilies" in profile:
