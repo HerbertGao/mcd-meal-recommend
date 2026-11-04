@@ -79,6 +79,54 @@ def _entry_at_iso(entry: Dict[str, Any]) -> str:
     return ""
 
 
+def _extra_codes(raw: Any) -> List[str]:
+    """Normalize extraMainCodes / extraSideCodes / extraDrinkCodes to unique strings."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for code in raw:
+        c = str(code or "")
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def _append_track(
+    track: List[Dict[str, Any]],
+    codes: List[str],
+    *,
+    primary: str,
+    primary_name: str,
+    at: str,
+    rotation_key: str,
+) -> None:
+    seen = {
+        str(row.get("code") or "")
+        for row in track
+        if str(row.get("at") or "") == at and str(row.get("rotationKey") or "") == rotation_key
+    }
+    ordered: List[str] = []
+    if primary and primary not in ordered:
+        ordered.append(primary)
+    for code in codes:
+        if code and code not in ordered:
+            ordered.append(code)
+    for code in ordered:
+        if code in seen:
+            continue
+        seen.add(code)
+        track.append(
+            {
+                "code": code,
+                "name": primary_name if code == primary else "",
+                "at": at,
+                "rotationKey": rotation_key,
+            }
+        )
+
+
 def normalize_history_doc(data: Any) -> Dict[str, Any]:
     """Accept legacy list[{date,rotationKey,mainCode}] or v2 {mains,sides,entries}."""
     doc = empty_history_doc()
@@ -88,6 +136,9 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
         for h in data:
             if not isinstance(h, dict):
                 continue
+            extra_mains = _extra_codes(h.get("extraMainCodes"))
+            extra_sides = _extra_codes(h.get("extraSideCodes"))
+            extra_drinks = _extra_codes(h.get("extraDrinkCodes"))
             entry = {
                 "date": str(h.get("date") or "")[:10],
                 "rotationKey": str(h.get("rotationKey") or ""),
@@ -96,36 +147,42 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
                 "sideCode": str(h["sideCode"]) if h.get("sideCode") else "",
                 "at": _entry_at_iso(h),
             }
-            doc["entries"].append(entry)
-            if entry["mainCode"]:
-                doc["mains"].append(
-                    {
-                        "code": entry["mainCode"],
-                        "name": str(h.get("mainName") or ""),
-                        "at": entry["at"] or entry["date"],
-                        "rotationKey": entry["rotationKey"],
-                    }
-                )
-            if entry["sideCode"]:
-                doc["sides"].append(
-                    {
-                        "code": entry["sideCode"],
-                        "name": str(h.get("sideName") or ""),
-                        "at": entry["at"] or entry["date"],
-                        "rotationKey": entry["rotationKey"],
-                    }
-                )
             drink_code = str(h.get("drinkCode") or "")
             if drink_code:
-                doc["drinks"].append(
-                    {
-                        "code": drink_code,
-                        "name": str(h.get("drinkName") or ""),
-                        "at": entry["at"] or entry["date"],
-                        "rotationKey": entry["rotationKey"],
-                    }
-                )
                 entry["drinkCode"] = drink_code
+            if extra_mains:
+                entry["extraMainCodes"] = [c for c in extra_mains if c != entry["mainCode"]]
+            if extra_sides:
+                entry["extraSideCodes"] = [c for c in extra_sides if c != entry["sideCode"]]
+            if extra_drinks:
+                entry["extraDrinkCodes"] = [c for c in extra_drinks if c != drink_code]
+            doc["entries"].append(entry)
+            at = entry["at"] or entry["date"]
+            rk = entry["rotationKey"]
+            _append_track(
+                doc["mains"],
+                entry.get("extraMainCodes") or [],
+                primary=entry["mainCode"],
+                primary_name=str(h.get("mainName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
+            _append_track(
+                doc["sides"],
+                entry.get("extraSideCodes") or [],
+                primary=entry["sideCode"],
+                primary_name=str(h.get("sideName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
+            _append_track(
+                doc["drinks"],
+                entry.get("extraDrinkCodes") or [],
+                primary=drink_code,
+                primary_name=str(h.get("drinkName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
         return doc
     if not isinstance(data, dict):
         return doc

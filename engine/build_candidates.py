@@ -288,6 +288,11 @@ def iter_side_combos(
     return combos
 
 
+def _blocked_as_drink(ch: Dict[str, Any]) -> bool:
+    """派、薯条、主食不能占饮品槽。"""
+    return is_sideish(ch) or is_mainish(ch)
+
+
 def select_drinks(
     choices: Sequence[Dict[str, Any]],
     prefer: Sequence[str],
@@ -297,16 +302,40 @@ def select_drinks(
     budget_fen: Optional[int],
     limit: int = MAX_DRINKS_PER_SELECTION,
 ) -> List[Dict[str, Any]]:
-    """从该套餐饮品轮里枚举，而不是锁死 prefer 列表的第一项。"""
+    """从饮品轮枚举。派、薯条和主食不能占饮品槽。
+
+    已识别的饮品/咖啡始终保留。偏好码里不是小食、主食的未知 SKU 也保留。
+    已经识别出饮品时，不再把其余未知项当成饮品。
+    一个都认不出时，丢掉小食和主食，只留不像派/薯条的项。
+    """
     chs = list(choices or [])
+    prefer_set = {str(x) for x in prefer if x}
     if prefer_coffee:
-        chs = [c for c in chs if is_coffee_choice(c)]
+        chs = [c for c in chs if is_coffee_choice(c) and not _blocked_as_drink(c)]
         if not chs:
             return []
     else:
-        drinks = [c for c in chs if is_drink(c) or is_coffee_choice(c)]
-        if drinks:
-            chs = drinks
+        recognized = [
+            c
+            for c in chs
+            if (is_drink(c) or is_coffee_choice(c)) and not _blocked_as_drink(c)
+        ]
+        recognized_ids = {id(c) for c in recognized}
+        preferred = [
+            c
+            for c in chs
+            if str(c.get("code") or "") in prefer_set
+            and not _blocked_as_drink(c)
+            and id(c) not in recognized_ids
+        ]
+        if recognized:
+            # 已有饮品时只追加偏好里的未知码，避免把派/薯条或杂项一并收进饮品槽
+            chs = recognized + preferred
+        else:
+            # 一个都认不出：丢掉小食和主食，只留不像派/薯条的项（新品饮品码）
+            chs = [c for c in chs if not _blocked_as_drink(c)]
+        if not chs:
+            return []
     fitting = [
         ch
         for ch in chs

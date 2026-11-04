@@ -663,6 +663,134 @@ class OfflineContractTest(unittest.TestCase):
         )
         self.assertEqual({code for code, _age in derived}, {"522021", "3050"})
 
+    def test_select_drinks_never_uses_pies_or_fries(self):
+        from build_candidates import select_drinks
+
+        def ch(code, name):
+            return {"code": code, "name": name, "diffFen": 0}
+
+        pies = select_drinks(
+            [ch("4105", "菠萝派"), ch("4810", "中薯条")],
+            ["4105", "4810"],
+            False,
+            0,
+            [],
+            None,
+        )
+        self.assertEqual(pies, [])
+
+        mixed = select_drinks(
+            [ch("522021", "无糖可乐"), ch("4105", "菠萝派"), ch("900001", "定制杯装")],
+            ["900001"],
+            False,
+            0,
+            [],
+            None,
+        )
+        self.assertEqual({c["code"] for c in mixed}, {"522021", "900001"})
+
+        dropped = select_drinks(
+            [ch("522021", "无糖可乐"), ch("900001", "定制杯装")],
+            [],
+            False,
+            0,
+            [],
+            None,
+        )
+        self.assertEqual([c["code"] for c in dropped], ["522021"])
+
+        unknown_only = select_drinks(
+            [ch("900001", "定制杯装"), ch("4810", "中薯条")],
+            [],
+            False,
+            0,
+            [],
+            None,
+        )
+        self.assertEqual([c["code"] for c in unknown_only], ["900001"])
+
+    def test_list_history_keeps_extra_side_and_drink_codes(self):
+        from profile_lib import normalize_history_doc, profile_to_request
+
+        raw = {
+            "date": "2026-11-04",
+            "at": "2026-11-04T12:00:00+08:00",
+            "rotationKey": "mk0884_1100_4810_515106_3050",
+            "mainCode": "1100",
+            "sideCode": "4810",
+            "extraSideCodes": ["515106", "515106"],
+            "drinkCode": "3050",
+            "extraDrinkCodes": ["522021"],
+        }
+        doc = normalize_history_doc([raw])
+        self.assertEqual([row["code"] for row in doc["sides"]], ["4810", "515106"])
+        self.assertEqual([row["code"] for row in doc["drinks"]], ["3050", "522021"])
+        self.assertEqual(doc["entries"][0]["extraSideCodes"], ["515106"])
+        self.assertEqual(doc["entries"][0]["extraDrinkCodes"], ["522021"])
+
+        loaded = profile_to_request({"storeCode": "000000", "history": [raw]})
+        self.assertEqual(
+            [row["code"] for row in loaded["historyTracks"]["sides"]],
+            ["4810", "515106"],
+        )
+        self.assertEqual(
+            [row["code"] for row in loaded["historyTracks"]["drinks"]],
+            ["3050", "522021"],
+        )
+
+        cand = score_lunch.ScoredCandidate(
+            rotation_key="mk0884_1100_4810_515106_522021",
+            human_summary="four",
+            price_fen=2800,
+            items=[
+                {
+                    "productCode": "9900000884",
+                    "quantity": 1,
+                    "roundList": [
+                        {"round": "1", "comboItemList": [{"code": "1100", "quantity": 1}]},
+                        {"round": "2", "comboItemList": [{"code": "4810", "quantity": 1}]},
+                        {"round": "3", "comboItemList": [{"code": "515106", "quantity": 1}]},
+                        {"round": "4", "comboItemList": [{"code": "522021", "quantity": 1}]},
+                    ],
+                }
+            ],
+            tags=["mcard_four"],
+            meta={"sideCodes": ["4810", "515106"], "drinkCodes": ["522021"], "primaryMainCode": "1100"},
+        )
+        req = {
+            "budgetFen": 3500,
+            "mealPeriod": "lunch",
+            "dining": "eat-in",
+            "history": loaded["history"],
+            "historyTracks": loaded["historyTracks"],
+            "historyWindowDays": 5,
+            "historyWindowPicks": 5,
+            "prefs": {
+                "priority": ["low_repeat"],
+                "satiety": "off",
+                "lowRecentRepeat": True,
+                "drink": {"ice": "no_ice"},
+                "unseenMainBoost": 1.0,
+                "unseenSideBoost": 1.0,
+                "unseenDrinkBoost": 1.0,
+                "unseenComboCap": 1.0,
+            },
+        }
+        score_lunch.score_candidate(cand, req)
+        self.assertLess(cand.meta["repeatSideMult"], 1)
+        self.assertEqual(cand.meta["primarySideCode"], "4810")
+        neutral = score_lunch.ScoredCandidate(
+            rotation_key="mk0884_1100_4437_4105_522021",
+            human_summary="other sides",
+            price_fen=2800,
+            items=cand.items,
+            tags=["mcard_four"],
+            meta={"sideCodes": ["4437", "4105"], "drinkCodes": ["522021"], "primaryMainCode": "1100"},
+        )
+        score_lunch.score_candidate(neutral, req)
+        self.assertEqual(neutral.meta["repeatSideMult"], 1)
+        self.assertLess(cand.breakdown["low_repeat"], neutral.breakdown["low_repeat"])
+
     def test_example_profiles_document_soft_prefs_without_personal_data(self):
         gi = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("engine/profiles/lunch.json", gi)
