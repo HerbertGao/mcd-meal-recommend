@@ -63,8 +63,10 @@
     "newTagRegex": "(上新|全新|新升级|新品|首发)",
     "newProductCodes": [],
     "newMainCodes": [],
+    "preferSideCodes": [],
     "unseenMainBoost": 1.22,
     "unseenSideBoost": 1.12,
+    "unseenDrinkBoost": 1.12,
     "unseenComboCap": 1.32
   },
   "selection": {

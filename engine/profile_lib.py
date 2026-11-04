@@ -65,8 +65,8 @@ def resolve_history_path(path: Optional[str]) -> Optional[Path]:
 
 
 def empty_history_doc() -> Dict[str, Any]:
-    """Canonical on-disk history: mains/sides tracks + flat entries."""
-    return {"version": 2, "mains": [], "sides": [], "entries": []}
+    """Canonical on-disk history: mains/sides/drinks tracks + flat entries."""
+    return {"version": 2, "mains": [], "sides": [], "drinks": [], "entries": []}
 
 
 def _entry_at_iso(entry: Dict[str, Any]) -> str:
@@ -79,6 +79,54 @@ def _entry_at_iso(entry: Dict[str, Any]) -> str:
     return ""
 
 
+def _extra_codes(raw: Any) -> List[str]:
+    """Normalize extraMainCodes / extraSideCodes / extraDrinkCodes to unique strings."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for code in raw:
+        c = str(code or "")
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def _append_track(
+    track: List[Dict[str, Any]],
+    codes: List[str],
+    *,
+    primary: str,
+    primary_name: str,
+    at: str,
+    rotation_key: str,
+) -> None:
+    seen = {
+        str(row.get("code") or "")
+        for row in track
+        if str(row.get("at") or "") == at and str(row.get("rotationKey") or "") == rotation_key
+    }
+    ordered: List[str] = []
+    if primary and primary not in ordered:
+        ordered.append(primary)
+    for code in codes:
+        if code and code not in ordered:
+            ordered.append(code)
+    for code in ordered:
+        if code in seen:
+            continue
+        seen.add(code)
+        track.append(
+            {
+                "code": code,
+                "name": primary_name if code == primary else "",
+                "at": at,
+                "rotationKey": rotation_key,
+            }
+        )
+
+
 def normalize_history_doc(data: Any) -> Dict[str, Any]:
     """Accept legacy list[{date,rotationKey,mainCode}] or v2 {mains,sides,entries}."""
     doc = empty_history_doc()
@@ -88,6 +136,9 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
         for h in data:
             if not isinstance(h, dict):
                 continue
+            extra_mains = _extra_codes(h.get("extraMainCodes"))
+            extra_sides = _extra_codes(h.get("extraSideCodes"))
+            extra_drinks = _extra_codes(h.get("extraDrinkCodes"))
             entry = {
                 "date": str(h.get("date") or "")[:10],
                 "rotationKey": str(h.get("rotationKey") or ""),
@@ -96,32 +147,50 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
                 "sideCode": str(h["sideCode"]) if h.get("sideCode") else "",
                 "at": _entry_at_iso(h),
             }
+            drink_code = str(h.get("drinkCode") or "")
+            if drink_code:
+                entry["drinkCode"] = drink_code
+            if extra_mains:
+                entry["extraMainCodes"] = [c for c in extra_mains if c != entry["mainCode"]]
+            if extra_sides:
+                entry["extraSideCodes"] = [c for c in extra_sides if c != entry["sideCode"]]
+            if extra_drinks:
+                entry["extraDrinkCodes"] = [c for c in extra_drinks if c != drink_code]
             doc["entries"].append(entry)
-            if entry["mainCode"]:
-                doc["mains"].append(
-                    {
-                        "code": entry["mainCode"],
-                        "name": str(h.get("mainName") or ""),
-                        "at": entry["at"] or entry["date"],
-                        "rotationKey": entry["rotationKey"],
-                    }
-                )
-            if entry["sideCode"]:
-                doc["sides"].append(
-                    {
-                        "code": entry["sideCode"],
-                        "name": str(h.get("sideName") or ""),
-                        "at": entry["at"] or entry["date"],
-                        "rotationKey": entry["rotationKey"],
-                    }
-                )
+            at = entry["at"] or entry["date"]
+            rk = entry["rotationKey"]
+            _append_track(
+                doc["mains"],
+                entry.get("extraMainCodes") or [],
+                primary=entry["mainCode"],
+                primary_name=str(h.get("mainName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
+            _append_track(
+                doc["sides"],
+                entry.get("extraSideCodes") or [],
+                primary=entry["sideCode"],
+                primary_name=str(h.get("sideName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
+            _append_track(
+                doc["drinks"],
+                entry.get("extraDrinkCodes") or [],
+                primary=drink_code,
+                primary_name=str(h.get("drinkName") or ""),
+                at=at,
+                rotation_key=rk,
+            )
         return doc
     if not isinstance(data, dict):
         return doc
-    if "version" in data or "mains" in data or "sides" in data or "entries" in data:
+    if "version" in data or "mains" in data or "sides" in data or "drinks" in data or "entries" in data:
         doc["version"] = int(data.get("version") or 2)
         doc["mains"] = [dict(x) for x in (data.get("mains") or []) if isinstance(x, dict)]
         doc["sides"] = [dict(x) for x in (data.get("sides") or []) if isinstance(x, dict)]
+        doc["drinks"] = [dict(x) for x in (data.get("drinks") or []) if isinstance(x, dict)]
         doc["entries"] = [
             dict(x)
             for x in (data.get("entries") or data.get("history") or [])
@@ -143,17 +212,46 @@ def normalize_history_doc(data: Any) -> Dict[str, Any]:
                 )
         if not doc["sides"]:
             for h in doc["entries"]:
+                codes = []
                 sc = str(h.get("sideCode") or "")
-                if not sc:
-                    continue
-                doc["sides"].append(
-                    {
-                        "code": sc,
-                        "name": str(h.get("sideName") or ""),
-                        "at": _entry_at_iso(h) or str(h.get("date") or ""),
-                        "rotationKey": str(h.get("rotationKey") or ""),
-                    }
-                )
+                if sc:
+                    codes.append(sc)
+                extra = h.get("extraSideCodes") or []
+                if isinstance(extra, list):
+                    for code in extra:
+                        c = str(code or "")
+                        if c and c not in codes:
+                            codes.append(c)
+                for sc in codes:
+                    doc["sides"].append(
+                        {
+                            "code": sc,
+                            "name": str(h.get("sideName") or "") if sc == str(h.get("sideCode") or "") else "",
+                            "at": _entry_at_iso(h) or str(h.get("date") or ""),
+                            "rotationKey": str(h.get("rotationKey") or ""),
+                        }
+                    )
+        if not doc["drinks"]:
+            for h in doc["entries"]:
+                codes = []
+                dc = str(h.get("drinkCode") or "")
+                if dc:
+                    codes.append(dc)
+                extra = h.get("extraDrinkCodes") or []
+                if isinstance(extra, list):
+                    for code in extra:
+                        c = str(code or "")
+                        if c and c not in codes:
+                            codes.append(c)
+                for dc in codes:
+                    doc["drinks"].append(
+                        {
+                            "code": dc,
+                            "name": str(h.get("drinkName") or "") if dc == str(h.get("drinkCode") or "") else "",
+                            "at": _entry_at_iso(h) or str(h.get("date") or ""),
+                            "rotationKey": str(h.get("rotationKey") or ""),
+                        }
+                    )
         return doc
     # unknown dict → try nested
     return normalize_history_doc(data.get("history") or data.get("entries") or [])
@@ -180,6 +278,7 @@ def save_history_doc(path: str, doc: Dict[str, Any]) -> Path:
         "version": int(doc.get("version") or 2),
         "mains": list(doc.get("mains") or []),
         "sides": list(doc.get("sides") or []),
+        "drinks": list(doc.get("drinks") or []),
         "entries": list(doc.get("entries") or []),
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -195,6 +294,8 @@ def append_history_pick(
     main_name: str = "",
     side_code: str = "",
     side_name: str = "",
+    drink_code: str = "",
+    drink_name: str = "",
     at: Optional[str] = None,
     seed: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -212,6 +313,7 @@ def append_history_pick(
         "priceFen": int(price_fen or 0),
         "mainCode": str(main_code or ""),
         "sideCode": str(side_code or ""),
+        "drinkCode": str(drink_code or ""),
     }
     if seed is not None:
         entry["seed"] = int(seed)
@@ -219,6 +321,8 @@ def append_history_pick(
         entry["mainName"] = main_name
     if side_name:
         entry["sideName"] = side_name
+    if drink_name:
+        entry["drinkName"] = drink_name
     doc.setdefault("entries", []).append(entry)
     if main_code:
         doc.setdefault("mains", []).append(
@@ -235,6 +339,16 @@ def append_history_pick(
             {
                 "code": str(side_code),
                 "name": str(side_name or ""),
+                "at": now,
+                "rotationKey": str(rotation_key or ""),
+                **({"seed": int(seed)} if seed is not None else {}),
+            }
+        )
+    if drink_code:
+        doc.setdefault("drinks", []).append(
+            {
+                "code": str(drink_code),
+                "name": str(drink_name or ""),
                 "at": now,
                 "rotationKey": str(rotation_key or ""),
                 **({"seed": int(seed)} if seed is not None else {}),
@@ -470,6 +584,7 @@ def profile_to_request(profile: Dict[str, Any], overlay: Optional[Dict[str, Any]
         req["historyTracks"] = {
             "mains": deepcopy(doc.get("mains") or []),
             "sides": deepcopy(doc.get("sides") or []),
+            "drinks": deepcopy(doc.get("drinks") or []),
         }
         if profile.get("historyPath"):
             req["historyPath"] = profile["historyPath"]
@@ -482,6 +597,7 @@ def profile_to_request(profile: Dict[str, Any], overlay: Optional[Dict[str, Any]
             req["historyTracks"] = {
                 "mains": deepcopy(doc.get("mains") or []),
                 "sides": deepcopy(doc.get("sides") or []),
+                "drinks": deepcopy(doc.get("drinks") or []),
             }
     # pass-through builder hints (ignored by schema consumers that strip unknown)
     if "candidateFamilies" in profile:

@@ -139,6 +139,271 @@ def pick_drink(choices: List[Dict[str, Any]], prefer: List[str]) -> Optional[Dic
     return None
 
 
+# 每个主食下：小食轮各取若干、组合数与饮品数有上限，避免菜单笛卡尔积撑爆候选池。
+MAX_CHOICES_PER_SIDE_ROUND = 4
+MAX_SIDE_COMBOS_PER_MAIN = 8
+MAX_DRINKS_PER_SELECTION = 4
+
+
+def _choice_sort_key(ch: Dict[str, Any], prefer: Sequence[str]) -> Tuple[int, int, str]:
+    code = str(ch.get("code") or "")
+    try:
+        pref_i = list(prefer).index(code)
+    except ValueError:
+        pref_i = 1000
+    return (pref_i, int(ch.get("diffFen") or 0), code)
+
+
+def truncate_choices(
+    choices: Sequence[Dict[str, Any]],
+    prefer: Sequence[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """软偏好排序后截断。偏好码只影响顺序，不当成唯一可选项。
+
+    当轮次里还有非偏好项且上限 ≥ 2 时，至少留一个非偏好席位，避免 prefer 列表把整轮写死。
+    """
+    ranked = sorted(list(choices or []), key=lambda c: _choice_sort_key(c, prefer))
+    if limit <= 0 or len(ranked) <= limit:
+        return ranked
+    prefer_set = {str(x) for x in prefer}
+    preferred = [c for c in ranked if str(c.get("code") or "") in prefer_set]
+    others = [c for c in ranked if str(c.get("code") or "") not in prefer_set]
+    if preferred and others and limit >= 2:
+        keep_pref = min(len(preferred), limit - 1)
+        picked = preferred[:keep_pref] + others[: limit - keep_pref]
+        picked.sort(key=lambda c: _choice_sort_key(c, prefer))
+        return picked
+    return ranked[:limit]
+
+
+def _within_budget(base_fen: int, parts: Sequence[Dict[str, Any]], budget_fen: Optional[int]) -> bool:
+    if budget_fen is None or int(budget_fen) <= 0:
+        return True
+    total = int(base_fen) + sum(int(p.get("diffFen") or 0) for p in parts)
+    return total <= int(budget_fen)
+
+
+def _looks_drink_round(rnd: Dict[str, Any]) -> bool:
+    name = str(rnd.get("name") or "")
+    if any(k in name for k in ("饮料", "饮品")):
+        return True
+    chs = list(rnd.get("choices") or [])
+    if not chs:
+        return False
+    n_drink = sum(1 for c in chs if is_drink(c) or is_coffee_choice(c))
+    n_main = sum(1 for c in chs if is_mainish(c))
+    return n_drink >= max(1, (len(chs) + 1) // 2) and n_drink > n_main
+
+
+def _looks_main_round(rnd: Dict[str, Any]) -> bool:
+    name = str(rnd.get("name") or "")
+    if any(k in name for k in ("饮料", "饮品", "小食", "配菜", "薯条", "甜品")):
+        return False
+    if any(k in name for k in ("主食", "汉堡", "红区")) or ("堡" in name and "小食" not in name):
+        return True
+    chs = list(rnd.get("choices") or [])
+    if not chs:
+        return False
+    n_main = sum(1 for c in chs if is_mainish(c))
+    return n_main >= max(1, (len(chs) + 1) // 2)
+
+
+def split_meal_rounds(
+    rounds: Sequence[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """主食轮、小食轮（按菜单顺序）、饮品轮。
+
+    先看轮次名和选项角色；认不出时退回「第一轮主食、最后一轮饮品、中间小食」。
+    """
+    seq = list(rounds or [])
+    drink = next((r for r in seq if _looks_drink_round(r)), None)
+    main = next((r for r in seq if r is not drink and _looks_main_round(r)), None)
+    if main is None:
+        main = next((r for r in seq if r is not drink), None)
+    if drink is None:
+        drink = next((r for r in reversed(seq) if r is not main), None)
+    sides = [r for r in seq if r is not main and r is not drink]
+    return main, sides, drink
+
+
+def mains_from_round(rnd: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """主食轮里的汉堡/卷。麦乐鸡等鸡块只做小食，不进入主食候选。"""
+    chs = list(rnd.get("choices") or [])
+    mains = [c for c in chs if is_mainish(c)]
+    if mains:
+        return mains
+    return [
+        c
+        for c in chs
+        if c.get("code") not in FORBIDDEN_AS_MAIN_CODES
+        and "麦乐鸡" not in (c.get("name") or "")
+        and "鸡块" not in (c.get("name") or "")
+        and not is_drink(c)
+        and not is_sideish(c)
+    ]
+
+
+def side_pools(
+    side_rounds: Sequence[Dict[str, Any]],
+    prefer_sides: Sequence[str],
+) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    pools: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
+    for rnd in side_rounds:
+        chs = [c for c in (rnd.get("choices") or []) if not is_drink(c)]
+        if not chs:
+            chs = list(rnd.get("choices") or [])
+        kept = truncate_choices(chs, prefer_sides, MAX_CHOICES_PER_SIDE_ROUND)
+        if kept:
+            pools.append((rnd, kept))
+    return pools
+
+
+def iter_side_combos(
+    pools: Sequence[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
+    max_combos: int,
+    accept,
+) -> List[List[Tuple[Dict[str, Any], Dict[str, Any]]]]:
+    """按轮次顺序做笛卡尔积；accept 为假的组合不占名额。"""
+    if not pools:
+        return [[]]
+    combos: List[List[Tuple[Dict[str, Any], Dict[str, Any]]]] = []
+
+    def rec(i: int, acc: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> None:
+        if len(combos) >= max_combos:
+            return
+        if i == len(pools):
+            if accept([ch for _, ch in acc]):
+                combos.append(list(acc))
+            return
+        _rnd, chs = pools[i]
+        for ch in chs:
+            acc.append((_rnd, ch))
+            rec(i + 1, acc)
+            acc.pop()
+            if len(combos) >= max_combos:
+                return
+
+    rec(0, [])
+    return combos
+
+
+def _blocked_as_drink(ch: Dict[str, Any]) -> bool:
+    """派、薯条、主食不能占饮品槽。"""
+    return is_sideish(ch) or is_mainish(ch)
+
+
+def select_drinks(
+    choices: Sequence[Dict[str, Any]],
+    prefer: Sequence[str],
+    prefer_coffee: bool,
+    base_fen: int,
+    extra: Sequence[Dict[str, Any]],
+    budget_fen: Optional[int],
+    limit: int = MAX_DRINKS_PER_SELECTION,
+) -> List[Dict[str, Any]]:
+    """从饮品轮枚举。派、薯条和主食不能占饮品槽。
+
+    已识别的饮品/咖啡始终保留。偏好码里不是小食、主食的未知 SKU 也保留。
+    已经识别出饮品时，不再把其余未知项当成饮品。
+    一个都认不出时，丢掉小食和主食，只留不像派/薯条的项。
+    """
+    chs = list(choices or [])
+    prefer_set = {str(x) for x in prefer if x}
+    if prefer_coffee:
+        chs = [c for c in chs if is_coffee_choice(c) and not _blocked_as_drink(c)]
+        if not chs:
+            return []
+    else:
+        recognized = [
+            c
+            for c in chs
+            if (is_drink(c) or is_coffee_choice(c)) and not _blocked_as_drink(c)
+        ]
+        recognized_ids = {id(c) for c in recognized}
+        preferred = [
+            c
+            for c in chs
+            if str(c.get("code") or "") in prefer_set
+            and not _blocked_as_drink(c)
+            and id(c) not in recognized_ids
+        ]
+        if recognized:
+            # 已有饮品时只追加偏好里的未知码，避免把派/薯条或杂项一并收进饮品槽
+            chs = recognized + preferred
+        else:
+            # 一个都认不出：丢掉小食和主食，只留不像派/薯条的项（新品饮品码）
+            chs = [c for c in chs if not _blocked_as_drink(c)]
+        if not chs:
+            return []
+    fitting = [
+        ch
+        for ch in chs
+        if _within_budget(base_fen, list(extra) + [ch], budget_fen)
+    ]
+    return truncate_choices(fitting, prefer, limit)
+
+
+def build_round_combo(
+    code: str,
+    det: Dict[str, Any],
+    picks: List[Tuple[Dict[str, Any], Dict[str, Any]]],
+    price_fen: int,
+    ice_key: str,
+    *,
+    key_prefix: str,
+    tags: List[str],
+    primary_main: str,
+    side_codes: Sequence[str],
+    drink_codes: Sequence[str],
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """按菜单轮次顺序写入 roundList。去冰只打在饮品码上。"""
+    order = {r["id"]: i for i, r in enumerate(rounds_of(det))}
+    ordered = sorted(picks, key=lambda p: order.get(p[0]["id"], 99))
+    drink_set = {str(c) for c in drink_codes if c}
+    round_list = []
+    name_bits = []
+    for rnd, ch in ordered:
+        iced = str(ch.get("code") or "") in drink_set
+        round_list.append(
+            {
+                "round": rnd["id"],
+                "comboItemList": [combo_item(ch["code"], ice_mod(ice_key) if iced else None)],
+            }
+        )
+        bit = str(ch.get("name") or ch.get("code") or "")
+        if iced:
+            bit += "去冰"
+        name_bits.append(bit)
+    code_bits = [str(ch.get("code") or "") for _, ch in ordered]
+    rk = f"{key_prefix}{str(code)[-4:]}_{'_'.join(code_bits)}"
+    product_name = str(det.get("name") or det.get("productName") or code)
+    summary = f"{product_name}（{'+'.join(name_bits)}）≈¥{price_fen / 100:.1f}"
+    cand: Dict[str, Any] = {
+        "id": rk,
+        "rotationKey": rk,
+        "humanSummary": summary,
+        "listPriceFen": price_fen,
+        "priceVerified": False,
+        "tags": list(tags),
+        "primaryMainCode": primary_main,
+        "sideCodes": [str(c) for c in side_codes if c],
+        "drinkCodes": [str(c) for c in drink_codes if c],
+        "items": [
+            {
+                "productCode": code,
+                "productName": product_name,
+                "quantity": 1,
+                "roundList": round_list,
+            }
+        ],
+    }
+    if extra:
+        cand.update(extra)
+    return cand
+
+
 def combo_item(code: str, mod: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     d: Dict[str, Any] = {"code": code, "quantity": 1}
     if mod:
@@ -191,7 +456,7 @@ def build_dual(
     tag_left = "sj" if "双吉" in str(det_a.get("name")) else (
         "t" if "三件套" in str(det_a.get("name")) else "x"
     )
-    rk = f"{tag_left}{main_a['code']}+zl{main_b['code']}_w{side['code']}"
+    rk = f"{tag_left}{main_a['code']}+zl{main_b['code']}_w{side['code']}_{drink['code']}"
     summary = (
         f"{item_a['productName']}（{main_a['name']}+{drink['name']}去冰）+ "
         f"{item_b['productName']}（{main_b['name']}+{side['name']}）≈¥{price_fen/100:.1f}"
@@ -204,6 +469,8 @@ def build_dual(
         "priceVerified": False,
         "tags": ["dual11", "deal", "satiety", "built"],
         "primaryMainCode": main_a["code"],
+        "sideCodes": [side["code"]] if side else [],
+        "drinkCodes": [drink["code"]] if drink else [],
         "items": [item_a, item_b],
     }
 
@@ -246,6 +513,8 @@ def build_dabao(
         "priceVerified": False,
         "tags": ["dabao", "deal", "satiety", "built"],
         "primaryMainCode": burger["code"],
+        "sideCodes": [side["code"]],
+        "drinkCodes": [drink["code"]],
         "items": items,
     }
 
@@ -305,6 +574,8 @@ def build_classic_three(
         "priceVerified": False,
         "tags": ["classic_three", "three_piece", "deal", "satiety", "built"],
         "primaryMainCode": burger["code"],
+        "sideCodes": [side["code"]],
+        "drinkCodes": [drink["code"]],
         "items": items,
     }
 
@@ -319,107 +590,8 @@ def price_for(code: str, menu: Dict[str, Any], diff_extra: int = 0) -> int:
 
 
 
-def build_mcard_four(
-    code: str,
-    det: Dict[str, Any],
-    burger: Dict[str, Any],
-    side_a: Dict[str, Any],
-    side_b: Dict[str, Any],
-    drink: Dict[str, Any],
-    price_fen: int,
-    ice_key: str,
-) -> Dict[str, Any]:
-    rounds = rounds_of(det)
-    if len(rounds) < 4:
-        raise ValueError(f"mcard four needs 4 rounds: {code}")
-    r0, r1, r2, r3 = rounds[0], rounds[1], rounds[2], rounds[3]
-    items = [
-        {
-            "productCode": code,
-            "productName": str(det.get("name") or det.get("productName") or code),
-            "quantity": 1,
-            "roundList": [
-                {"round": r0["id"], "comboItemList": [combo_item(burger["code"])]},
-                {"round": r1["id"], "comboItemList": [combo_item(side_a["code"])]},
-                {"round": r2["id"], "comboItemList": [combo_item(side_b["code"])]},
-                {
-                    "round": r3["id"],
-                    "comboItemList": [combo_item(drink["code"], ice_mod(ice_key))],
-                },
-            ],
-        }
-    ]
-    rk = f"mk{code[-4:]}_{burger['code']}_{side_a['code']}_{side_b['code']}_{drink['code']}"
-    summary = (
-        f"{det.get('name')}（{burger['name']}+{side_a['name']}+{side_b['name']}+"
-        f"{drink['name']}去冰）≈¥{price_fen/100:.1f}"
-    )
-    return {
-        "id": rk,
-        "rotationKey": rk,
-        "humanSummary": summary,
-        "listPriceFen": price_fen,
-        "priceVerified": False,
-        "tags": ["mcard_four", "mcard", "four_piece", "deal", "satiety", "built"],
-        "primaryMainCode": burger["code"],
-        "mcardFour": True,
-        "items": items,
-    }
-
-
 def is_coffee_choice(ch: Dict[str, Any]) -> bool:
     return ch["code"] in set(COFFEE_CODES_PREF) or bool(COFFEE_NAME_RE.search(ch.get("name") or ""))
-
-
-def pick_coffee(choices: List[Dict[str, Any]], prefer: List[str]) -> Optional[Dict[str, Any]]:
-    coffees = [ch for ch in choices if is_coffee_choice(ch)]
-    if not coffees:
-        return None
-    # prefer listed codes, then lowest diffFen (鲜萃 often +¥1.5 vs 美式 +¥9)
-    def rank(ch: Dict[str, Any]):
-        try:
-            pref_i = prefer.index(ch["code"])
-        except ValueError:
-            pref_i = 999
-        return (pref_i, ch.get("diffFen") or 0, ch["code"])
-    coffees.sort(key=rank)
-    return coffees[0]
-
-
-def pick_coffee_budgeted(
-    choices: List[Dict[str, Any]],
-    prefer: List[str],
-    base_fen: int,
-    extra_fen: int = 0,
-    budget_fen: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    """Coffee that fits remaining budget; prefer list order, then lowest diff."""
-    coffees = [ch for ch in choices if is_coffee_choice(ch)]
-    if not coffees:
-        return None
-    if budget_fen is not None:
-        coffees = [
-            ch
-            for ch in coffees
-            if int(base_fen) + int(extra_fen) + int(ch.get("diffFen") or 0) <= int(budget_fen)
-        ]
-        if not coffees:
-            return None
-    def rank(ch: Dict[str, Any]):
-        try:
-            pref_i = prefer.index(ch["code"])
-        except ValueError:
-            pref_i = 999
-        return (int(ch.get("diffFen") or 0), pref_i, ch["code"])
-    coffees.sort(key=rank)
-    # among zero-diff, honor prefer order
-    zero = [c for c in coffees if int(c.get("diffFen") or 0) == 0]
-    pool = zero or coffees
-    for code in prefer:
-        for ch in pool:
-            if ch["code"] == code:
-                return ch
-    return pool[0]
 
 
 def resolve_families(req: Dict[str, Any]) -> List[str]:
@@ -487,36 +659,85 @@ def expand_mcard_four(
     prefer_drinks: List[str],
     ice_key: str,
     prefer_coffee: bool,
+    budget_fen: Optional[int] = None,
+    prefer_sides: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """麦金卡四件套：先定主食，再按小食轮配组合，最后从饮品轮枚举。
+
+    小食对和饮品都来自该套餐 detail 的可选项，不用写死的单一小食对或默认饮品。
+    preferSideCodes / drink.preferCodes 只做软排序；超预算的组合丢掉。
+    """
     out: List[Dict[str, Any]] = []
+    prefer_side_codes = [str(x) for x in (prefer_sides or [])]
+    prefer_drink_codes = [str(x) for x in (prefer_drinks or [])]
     ordered = mcard_four_codes(menu, details) or [c for c in MCARD_FOUR_CODES if c in details]
     for code in ordered:
         det = details.get(code)
         if not det:
             continue
         rounds = rounds_of(det)
-        if len(rounds) < 4:
+        if len(rounds) < 3:
             continue
-        burgers = rounds[0]["choices"]
-        sides_a = rounds[1]["choices"]
-        sides_b = rounds[2]["choices"]
-        drinks = rounds[3]["choices"]
-        if prefer_coffee:
-            drink = pick_coffee(drinks, prefer_drinks) or pick_drink(drinks, prefer_drinks)
-        else:
-            drink = pick_drink(drinks, prefer_drinks)
-        side_a = next((c for c in sides_a if c["code"] in {"4810", "4800", "4437"}), sides_a[0] if sides_a else None)
-        side_b = next((c for c in sides_b if c["code"] in {"515106", "1401", "505416", "1700"}), sides_b[0] if sides_b else None)
-        if not drink or not side_a or not side_b:
+        main_r, side_rs, drink_r = split_meal_rounds(rounds)
+        if not main_r or not drink_r or not side_rs:
+            continue
+        mains = mains_from_round(main_r)
+        pools = side_pools(side_rs, prefer_side_codes)
+        if not mains or not pools:
             continue
         base = price_for(code, menu)
-        for burger in burgers:
-            price = base + burger["diffFen"] + side_a["diffFen"] + side_b["diffFen"] + drink["diffFen"]
-            tags_drink = "coffee" if is_coffee_choice(drink) else "drink"
-            cand = build_mcard_four(code, det, burger, side_a, side_b, drink, price, ice_key)
-            if tags_drink == "coffee" and "coffee" not in cand["tags"]:
-                cand["tags"].append("coffee")
-            out.append(cand)
+        drink_source = list(drink_r.get("choices") or [])
+        if prefer_coffee:
+            coffees = [c for c in drink_source if is_coffee_choice(c)]
+            if coffees:
+                drink_source = coffees
+        min_drink_diff = min((int(c.get("diffFen") or 0) for c in drink_source), default=0)
+        # 先主食，再小食组合，再饮品
+        for burger in mains:
+            def _side_ok(side_chs: Sequence[Dict[str, Any]], _burger=burger) -> bool:
+                return _within_budget(
+                    base,
+                    [_burger] + list(side_chs) + [{"diffFen": min_drink_diff}],
+                    budget_fen,
+                )
+
+            for combo in iter_side_combos(pools, MAX_SIDE_COMBOS_PER_MAIN, _side_ok):
+                side_chs = [ch for _, ch in combo]
+                drinks = select_drinks(
+                    drink_r.get("choices") or [],
+                    prefer_drink_codes,
+                    prefer_coffee,
+                    base,
+                    [burger] + side_chs,
+                    budget_fen,
+                )
+                for drink in drinks:
+                    price = (
+                        base
+                        + int(burger.get("diffFen") or 0)
+                        + sum(int(c.get("diffFen") or 0) for c in side_chs)
+                        + int(drink.get("diffFen") or 0)
+                    )
+                    if not _within_budget(base, [burger] + side_chs + [drink], budget_fen):
+                        continue
+                    tags = ["mcard_four", "mcard", "four_piece", "deal", "satiety", "built"]
+                    if is_coffee_choice(drink) and "coffee" not in tags:
+                        tags.append("coffee")
+                    out.append(
+                        build_round_combo(
+                            code,
+                            det,
+                            [(main_r, burger)] + combo + [(drink_r, drink)],
+                            price,
+                            ice_key,
+                            key_prefix="mk",
+                            tags=tags,
+                            primary_main=str(burger.get("code") or ""),
+                            side_codes=[str(c.get("code") or "") for c in side_chs],
+                            drink_codes=[str(drink.get("code") or "")],
+                            extra={"mcardFour": True},
+                        )
+                    )
     return out
 
 
@@ -635,6 +856,8 @@ def build_breakfast_coffee(
         "tags": tags,
         "primaryMainCode": main["code"],
         "primarySideCode": side["code"] if side else "",
+        "sideCodes": [side["code"]] if side else [],
+        "drinkCodes": [drink["code"]],
         "items": [
             {
                 "productCode": code,
@@ -689,20 +912,25 @@ def expand_breakfast_coffee_combos(
         else:
             sides = [None]
         base = price_for(code, menu)
+        # 先主食，再小食，再从饮品轮里的咖啡枚举
         for main in mains[:6]:
             for side in sides:
-                extra = int(main["diffFen"]) + (int(side["diffFen"]) if side else 0)
-                drink = pick_coffee_budgeted(
-                    r_drink["choices"], prefer_drinks, base, extra_fen=extra, budget_fen=budget_fen
+                extra_parts = [main] + ([side] if side else [])
+                drinks = select_drinks(
+                    r_drink["choices"],
+                    prefer_drinks,
+                    True,
+                    base,
+                    extra_parts,
+                    budget_fen,
                 )
-                if not drink:
-                    continue
-                price = base + main["diffFen"] + drink["diffFen"] + (side["diffFen"] if side else 0)
-                if budget_fen is not None and price > int(budget_fen):
-                    continue
-                out.append(
-                    build_breakfast_coffee(code, det, main, drink, price, ice_key, side=side)
-                )
+                for drink in drinks:
+                    price = base + main["diffFen"] + drink["diffFen"] + (side["diffFen"] if side else 0)
+                    if budget_fen is not None and price > int(budget_fen):
+                        continue
+                    out.append(
+                        build_breakfast_coffee(code, det, main, drink, price, ice_key, side=side)
+                    )
     return out
 
 
@@ -712,6 +940,7 @@ def expand_coffee_combo(
     prefer_drinks: List[str],
     ice_key: str,
     budget_fen: Optional[int] = None,
+    prefer_sides: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Build filling combos whose drink slot is coffee.
 
@@ -724,8 +953,19 @@ def expand_coffee_combo(
         expand_breakfast_coffee_combos(details, menu, prefer_drinks, ice_key, budget_fen=budget_fen)
     )
     # Prefer mcard fours with coffee drink (often empty on breakfast menu)
-    out.extend(expand_mcard_four(details, menu, prefer_drinks, ice_key, prefer_coffee=True))
-    # dabao with coffee
+    out.extend(
+        expand_mcard_four(
+            details,
+            menu,
+            prefer_drinks,
+            ice_key,
+            prefer_coffee=True,
+            budget_fen=budget_fen,
+            prefer_sides=prefer_sides,
+        )
+    )
+    # dabao with coffee：主食 → 小食轮 → 饮品轮里的咖啡
+    side_pref = [str(x) for x in (prefer_sides or [])]
     for code in DABAO_IDS:
         det = details.get(code)
         if not det:
@@ -733,21 +973,36 @@ def expand_coffee_combo(
         rounds = rounds_of(det)
         if len(rounds) < 3:
             continue
-        burgers = rounds[0]["choices"]
-        sides = rounds[1]["choices"]
-        drinks = rounds[2]["choices"]
-        drink = pick_coffee(drinks, prefer_drinks)
-        side = next((c for c in sides if c["code"] in {"4810", "4800"}), sides[0] if sides else None)
-        if not drink or not side:
+        burgers = [c for c in rounds[0]["choices"] if is_mainish(c)] or [
+            c
+            for c in rounds[0]["choices"]
+            if c["code"] not in FORBIDDEN_AS_MAIN_CODES and "麦乐鸡" not in (c.get("name") or "")
+        ]
+        sides = truncate_choices(
+            [c for c in rounds[1]["choices"] if not is_drink(c)] or list(rounds[1]["choices"]),
+            side_pref,
+            MAX_CHOICES_PER_SIDE_ROUND,
+        )
+        if not burgers or not sides:
             continue
         base = price_for(code, menu)
         for burger in burgers:
-            price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
-            cand = build_dabao(code, det, burger, side, drink, price, ice_key)
-            cand["tags"] = list(dict.fromkeys((cand.get("tags") or []) + ["coffee", "coffee_combo"]))
-            cand["rotationKey"] = f"cf{cand['rotationKey']}"
-            cand["id"] = cand["rotationKey"]
-            out.append(cand)
+            for side in sides:
+                drinks = select_drinks(
+                    rounds[2]["choices"],
+                    prefer_drinks,
+                    True,
+                    base,
+                    [burger, side],
+                    budget_fen,
+                )
+                for drink in drinks:
+                    price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
+                    cand = build_dabao(code, det, burger, side, drink, price, ice_key)
+                    cand["tags"] = list(dict.fromkeys((cand.get("tags") or []) + ["coffee", "coffee_combo"]))
+                    cand["rotationKey"] = f"cf{cand['rotationKey']}"
+                    cand["id"] = cand["rotationKey"]
+                    out.append(cand)
     # dual 1+1 with coffee on drink leg (if available in white zone)
     zl = details.get(DUAL11_RIGHT)
     if zl:
@@ -756,9 +1011,6 @@ def expand_coffee_combo(
             if not det:
                 continue
             red, white = red_white(rounds_of(det))
-            coffee = pick_coffee(white["choices"], prefer_drinks)
-            if not coffee:
-                continue
             zl_red, zl_white = red_white(rounds_of(zl))
             sides = [c for c in zl_white["choices"] if not is_drink(c)]
             sides = sorted(sides, key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]))[:3]
@@ -770,14 +1022,23 @@ def expand_coffee_combo(
                     if main_a["code"] == main_b["code"]:
                         continue
                     for side in sides[:2]:
-                        price = base + main_a["diffFen"] + main_b["diffFen"] + side["diffFen"]
-                        cand = build_dual(
-                            left_code, det, main_a, coffee, DUAL11_RIGHT, zl, main_b, side, price, ice_key
+                        coffees = select_drinks(
+                            white["choices"],
+                            prefer_drinks,
+                            True,
+                            base,
+                            [main_a, main_b, side],
+                            budget_fen,
                         )
-                        cand["tags"] = list(dict.fromkeys((cand.get("tags") or []) + ["coffee", "coffee_combo"]))
-                        cand["rotationKey"] = f"cf{cand['rotationKey']}"
-                        cand["id"] = cand["rotationKey"]
-                        out.append(cand)
+                        for coffee in coffees:
+                            price = base + main_a["diffFen"] + main_b["diffFen"] + side["diffFen"] + coffee["diffFen"]
+                            cand = build_dual(
+                                left_code, det, main_a, coffee, DUAL11_RIGHT, zl, main_b, side, price, ice_key
+                            )
+                            cand["tags"] = list(dict.fromkeys((cand.get("tags") or []) + ["coffee", "coffee_combo"]))
+                            cand["rotationKey"] = f"cf{cand['rotationKey']}"
+                            cand["id"] = cand["rotationKey"]
+                            out.append(cand)
     return out
 
 
@@ -787,6 +1048,7 @@ def expand_dual_1plus1(
     menu: Dict[str, Any],
     prefer: List[str],
     ice_key: str,
+    budget_fen: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     seen = set()
@@ -822,9 +1084,6 @@ def expand_dual_1plus1(
         if not det:
             continue
         red, white = red_white(rounds_of(det))
-        drink = pick_drink(white["choices"], prefer)
-        if not drink:
-            continue
         # 左腿红区只要真汉堡/卷；禁止麦乐鸡/琵琶腿/鸡排当主堡
         left_mains = [c for c in red["choices"] if is_mainish(c)]
         if not left_mains:
@@ -844,18 +1103,32 @@ def expand_dual_1plus1(
                 if not (is_mainish(main_a) or is_mainish(main_b)):
                     continue
                 for side in zl_sides_sorted[:3]:
-                    price = base + main_a["diffFen"] + main_b["diffFen"] + side["diffFen"]
-                    cand = build_dual(
-                        left_code, det, main_a, drink, DUAL11_RIGHT, zl, main_b, side, price, ice_key
+                    drinks = select_drinks(
+                        white["choices"],
+                        prefer,
+                        False,
+                        base,
+                        [main_a, main_b, side],
+                        budget_fen,
                     )
-                    if cand["rotationKey"] in seen:
-                        continue
-                    seen.add(cand["rotationKey"])
-                    out.append(cand)
+                    for drink in drinks:
+                        price = (
+                            base
+                            + main_a["diffFen"]
+                            + main_b["diffFen"]
+                            + side["diffFen"]
+                            + drink["diffFen"]
+                        )
+                        cand = build_dual(
+                            left_code, det, main_a, drink, DUAL11_RIGHT, zl, main_b, side, price, ice_key
+                        )
+                        if cand["rotationKey"] in seen:
+                            continue
+                        seen.add(cand["rotationKey"])
+                        out.append(cand)
 
     sj = details.get("9900016655")
     if zl and sj:
-        zl_drink = pick_drink(zl_white["choices"], prefer)
         sj_red, sj_white = red_white(rounds_of(sj))
         sj_sides = [c for c in sj_white["choices"] if not is_drink(c)]
         sj_sides = sorted(sj_sides, key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]))[:3]
@@ -869,19 +1142,26 @@ def expand_dual_1plus1(
                 if main_a["code"] == main_b["code"]:
                     continue
                 for side in sj_sides[:2]:
-                    if not zl_drink:
-                        continue
-                    price = base + main_a["diffFen"] + main_b["diffFen"]
-                    cand = build_dual(
-                        DUAL11_RIGHT, zl, main_a, zl_drink, "9900016655", sj, main_b, side, price, ice_key
+                    drinks = select_drinks(
+                        zl_white["choices"],
+                        prefer,
+                        False,
+                        base,
+                        [main_a, main_b, side],
+                        budget_fen,
                     )
-                    cand["rotationKey"] = f"zl{main_a['code']}+sj{main_b['code']}_w{side['code']}"
-                    cand["id"] = cand["rotationKey"]
-                    cand["primaryMainCode"] = main_a["code"]
-                    if cand["rotationKey"] in seen:
-                        continue
-                    seen.add(cand["rotationKey"])
-                    out.append(cand)
+                    for zl_drink in drinks:
+                        price = base + main_a["diffFen"] + main_b["diffFen"] + zl_drink["diffFen"]
+                        cand = build_dual(
+                            DUAL11_RIGHT, zl, main_a, zl_drink, "9900016655", sj, main_b, side, price, ice_key
+                        )
+                        cand["rotationKey"] = f"zl{main_a['code']}+sj{main_b['code']}_w{side['code']}_{zl_drink['code']}"
+                        cand["id"] = cand["rotationKey"]
+                        cand["primaryMainCode"] = main_a["code"]
+                        if cand["rotationKey"] in seen:
+                            continue
+                        seen.add(cand["rotationKey"])
+                        out.append(cand)
     return out
 
 
@@ -890,9 +1170,12 @@ def expand_dabao(
     menu: Dict[str, Any],
     prefer: List[str],
     ice_key: str,
+    budget_fen: Optional[int] = None,
+    prefer_sides: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     seen = set()
+    side_pref = [str(x) for x in (prefer_sides or [])]
     for code in DABAO_IDS:
         det = details.get(code)
         if not det:
@@ -900,21 +1183,40 @@ def expand_dabao(
         rounds = rounds_of(det)
         if len(rounds) < 3:
             continue
-        burgers = rounds[0]["choices"]
-        sides = rounds[1]["choices"]
-        drinks = rounds[2]["choices"]
-        drink = pick_drink(drinks, prefer)
-        side = next((c for c in sides if c["code"] in {"4810", "4800"}), sides[0] if sides else None)
-        if not drink or not side:
+        burgers = [c for c in rounds[0]["choices"] if is_mainish(c)]
+        if not burgers:
+            burgers = [
+                c
+                for c in rounds[0]["choices"]
+                if c["code"] not in FORBIDDEN_AS_MAIN_CODES
+                and "麦乐鸡" not in (c.get("name") or "")
+                and not is_drink(c)
+            ]
+        sides = truncate_choices(
+            [c for c in rounds[1]["choices"] if not is_drink(c)] or list(rounds[1]["choices"]),
+            side_pref,
+            MAX_CHOICES_PER_SIDE_ROUND,
+        )
+        if not burgers or not sides:
             continue
         base = price_for(code, menu)
         for burger in burgers:
-            price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
-            cand = build_dabao(code, det, burger, side, drink, price, ice_key)
-            if cand["rotationKey"] in seen:
-                continue
-            seen.add(cand["rotationKey"])
-            out.append(cand)
+            for side in sides:
+                drinks = select_drinks(
+                    rounds[2]["choices"],
+                    prefer,
+                    False,
+                    base,
+                    [burger, side],
+                    budget_fen,
+                )
+                for drink in drinks:
+                    price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
+                    cand = build_dabao(code, det, burger, side, drink, price, ice_key)
+                    if cand["rotationKey"] in seen:
+                        continue
+                    seen.add(cand["rotationKey"])
+                    out.append(cand)
     return out
 
 
@@ -996,6 +1298,7 @@ def expand_classic_three(
     prefer: List[str],
     ice_key: str,
     budget_fen: int,
+    prefer_sides: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Expand discovered classic three-piece meals; only keep listPrice ≤ budget."""
     out: List[Dict[str, Any]] = []
@@ -1054,25 +1357,34 @@ def expand_classic_three(
         ]
         if not burgers:
             continue
-        sides = list(r_side["choices"] or [])
-        drinks = list(r_drink["choices"] or [])
-        drink = pick_drink(drinks, prefer)
-        side = next(
-            (c for c in sides if c["code"] in {"4810", "4800", "4437", "514782"}),
-            sides[0] if sides else None,
+        side_pref = [str(x) for x in (prefer_sides or [])]
+        sides = truncate_choices(
+            [c for c in (r_side["choices"] or []) if not is_drink(c)] or list(r_side["choices"] or []),
+            side_pref,
+            MAX_CHOICES_PER_SIDE_ROUND,
         )
-        if not drink or not side:
+        if not sides:
             continue
         base = price_for(code, menu)
         for burger in burgers:
-            price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
-            if budget_fen > 0 and price > budget_fen:
-                continue
-            cand = build_classic_three(code, det, burger, side, drink, price, ice_key)
-            if cand["rotationKey"] in seen:
-                continue
-            seen.add(cand["rotationKey"])
-            out.append(cand)
+            for side in sides:
+                drinks = select_drinks(
+                    r_drink["choices"] or [],
+                    prefer,
+                    False,
+                    base,
+                    [burger, side],
+                    budget_fen,
+                )
+                for drink in drinks:
+                    price = base + burger["diffFen"] + side["diffFen"] + drink["diffFen"]
+                    if budget_fen > 0 and price > budget_fen:
+                        continue
+                    cand = build_classic_three(code, det, burger, side, drink, price, ice_key)
+                    if cand["rotationKey"] in seen:
+                        continue
+                    seen.add(cand["rotationKey"])
+                    out.append(cand)
     return out
 
 
@@ -1089,6 +1401,7 @@ def expand(
     prefer = [str(x) for x in (drink_prefs.get("preferCodes") or ["522021", "3071"])]
     ice_key = str(drink_prefs.get("iceKey") or "0-0")
     coffee_prefer = [str(x) for x in ((prefs or {}).get("coffeePreferCodes") or prefer)]
+    prefer_sides = [str(x) for x in ((prefs or {}).get("preferSideCodes") or [])]
 
     fams = [str(x) for x in (families or [])]
     if not fams:
@@ -1106,16 +1419,30 @@ def expand(
             out.append(c)
 
     if "coffee_combo" in fams:
-        add_all(expand_coffee_combo(details, menu, coffee_prefer, ice_key, budget_fen=budget_fen))
+        add_all(expand_coffee_combo(
+            details, menu, coffee_prefer, ice_key, budget_fen=budget_fen, prefer_sides=prefer_sides
+        ))
     if "mcard_four" in fams:
         prefer_coffee = "coffee" in ((prefs or {}).get("priority") or []) or bool((prefs or {}).get("requireCoffee"))
-        add_all(expand_mcard_four(details, menu, coffee_prefer if prefer_coffee else prefer, ice_key, prefer_coffee))
+        add_all(expand_mcard_four(
+            details,
+            menu,
+            coffee_prefer if prefer_coffee else prefer,
+            ice_key,
+            prefer_coffee,
+            budget_fen=budget_fen,
+            prefer_sides=prefer_sides,
+        ))
     if "dual_1plus1" in fams:
-        add_all(expand_dual_1plus1(details, menu, prefer, ice_key))
+        add_all(expand_dual_1plus1(details, menu, prefer, ice_key, budget_fen=budget_fen))
     if "dabao" in fams:
-        add_all(expand_dabao(details, menu, prefer, ice_key))
+        add_all(expand_dabao(
+            details, menu, prefer, ice_key, budget_fen=budget_fen, prefer_sides=prefer_sides
+        ))
     if "classic_three" in fams:
-        add_all(expand_classic_three(details, menu, prefer, ice_key, int(budget_fen or 0)))
+        add_all(expand_classic_three(
+            details, menu, prefer, ice_key, int(budget_fen or 0), prefer_sides=prefer_sides
+        ))
 
     # 新品 tags：MCP 无 isNew，用菜单 categories[].meals[].tags（上新/全新…）+ prefs
     tag_new_candidates(out, menu, prefs or {})
