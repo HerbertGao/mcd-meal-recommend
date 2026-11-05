@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Expand dual-1+1 / 大堡口福 candidates from meal-details (no MCP / no order).
+"""Expand dual-1+1 / 大堡口福 / 麦金卡 candidates from meal-details (no MCP / no order).
+
+Deal SKUs come from the slim menu (category, mealIndex, name). Hardcoded codes are
+only a fallback when that signal is missing. ``--max`` then round-robins across
+families and across dual-left / mcard product codes so a new leg is not trimmed away.
 
 Usage:
   python3 build_candidates.py \\
@@ -15,7 +19,7 @@ import json
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from mcp_contract import ContractError, load_snapshot, normalize_menu, rounds_of
 from profile_lib import SCRIPT_DIR, apply_prefs_file, load_profile, resolve_profile_path
@@ -28,16 +32,22 @@ DRINK_CODES = {"522021", "3071", "522020", "3050", "3060", "3110"}
 NON_DRINK_WHITE = {"4105", "4106", "4437", "4420", "4422"}
 FORBIDDEN_AS_MAIN_CODES = {"1401"}  # 麦乐鸡 — never left-leg / primary main
 
-MCARD_FOUR_CODES = [
+# 菜单没有分类/名称信号时的退路。能从当日菜单认出家族时，不以这些码为准。
+FALLBACK_MCARD_FOUR_CODES = [
     "9900004236",  # 人气超值四件套随心选 ¥28
     "9900000884",  # 酥酥多笋卷四件套 ¥28
     "9900016629",  # 海陆双全堡四件套 ¥30.9
     "9900010110",  # 鱼牛汉堡四件套随心选 ¥32
     "9900006957",  # 安格斯厚牛堡四件套随心选 ¥37（预算外由 scorer 淘汰）
 ]
-DUAL11_LEFT = ["9900016655", "9900016651"]
-DUAL11_RIGHT = "9900016668"
-DABAO_IDS = ["9900016670", "9900016671", "9900016673", "9900016674"]
+FALLBACK_DUAL_LEFT = ["9900016655", "9900016651"]  # 双吉 / 三件套左腿
+FALLBACK_DUAL_RIGHT = ["9900016668"]  # 真有料右腿
+FALLBACK_DABAO_CODES = ["9900016670", "9900016671", "9900016673", "9900016674"]
+# 旧名只是退路别名。发现逻辑不把它们当作唯一名单。
+MCARD_FOUR_CODES = FALLBACK_MCARD_FOUR_CODES
+DUAL11_LEFT = FALLBACK_DUAL_LEFT
+DUAL11_RIGHT = FALLBACK_DUAL_RIGHT[0]
+DABAO_IDS = FALLBACK_DABAO_CODES
 COFFEE_CODES_PREF = ["520688", "521327", "507411", "507368", "507409", "507328"]  # cheaper 鲜萃 first
 COFFEE_NAME_RE = re.compile(r"(咖啡|拿铁|美式|卡布|奶铁|鲜萃冰咖|鲜萃咖啡)", re.I)
 
@@ -50,6 +60,12 @@ CLASSIC_THREE_EXCLUDE_RE = re.compile(
     r"(大堡口福|随心配|1\+1|四件套|麦金卡|开心乐园|麦乐鸡|鸡翅|双人|拼盘|八件|分享|BFF|周边|炸鸡架|亲子)",
     re.I,
 )
+DUAL_SIGNAL_RE = re.compile(r"(随心配|1\s*[+＋]\s*1)")
+MCARD_CAT_RE = re.compile(r"(麦金卡|金卡专享)")
+MCARD_FOUR_NAME_RE = re.compile(r"四件套")
+DABAO_SIGNAL_RE = re.compile(r"大堡口福")
+SHARE_MEAL_RE = re.compile(r"(双人|三人|多人|分享|拼盘|八件|亲子|BFF|周边|派对)")
+OTHER_DEAL_RE = re.compile(r"(四件套|大堡口福|麦金卡|金卡专享|开心乐园|早餐|麦满分)")
 
 
 def load(p: Path) -> Any:
@@ -647,21 +663,273 @@ def resolve_families(req: Dict[str, Any]) -> List[str]:
     return out
 
 
-def mcard_four_codes(menu: Dict[str, Any], details: Dict[str, Dict[str, Any]]) -> List[str]:
-    """Union of slim-menu mcard codes + known defaults; cheapest first, then known order."""
-    from_menu = [str(c) for c in ((menu or {}).get("mcardFourProductCodes") or [])]
-    known = list(MCARD_FOUR_CODES)
+class DualLegs(NamedTuple):
+    left: List[str]
+    right: List[str]
+    source: str  # "menu" when category/name matched, else "fallback"
+    roles: Dict[str, str]  # productCode -> left_three | left_burger | right
+
+
+def _as_codes(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(v) for v in value if v]
+
+
+def iter_menu_products(menu: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """分类餐品优先，mealIndex 补没有出现在分类里的码。"""
+    idx = (menu or {}).get("mealIndex") or {}
+    if not isinstance(idx, dict):
+        idx = {}
+    out: List[Dict[str, Any]] = []
     seen = set()
-    merged: List[str] = []
-    for c in known + from_menu:
-        if c in seen:
+
+    def add(code: Any, name: Any, category: Any, tags: Any, meta: Any) -> None:
+        key = str(code or "")
+        if not key or key in seen:
+            return
+        seen.add(key)
+        index_meta = idx.get(key) if isinstance(idx.get(key), dict) else {}
+        merged = dict(index_meta or {})
+        if isinstance(meta, dict):
+            for field, val in meta.items():
+                if field not in merged or merged[field] in (None, "", [], {}):
+                    merged[field] = val
+        resolved_tags = [str(t) for t in (tags or merged.get("tags") or []) if t]
+        out.append(
+            {
+                "code": key,
+                "name": str(name or merged.get("name") or merged.get("productName") or ""),
+                "category": str(category or merged.get("category") or merged.get("categoryName") or ""),
+                "tags": resolved_tags,
+                "meta": merged,
+            }
+        )
+
+    for cat in (menu or {}).get("categories") or []:
+        if not isinstance(cat, dict):
             continue
-        if c not in details and c not in set(from_menu) and c not in set(known):
+        cname = str(cat.get("name") or cat.get("categoryName") or "")
+        meals = cat.get("meals") or cat.get("products") or []
+        if not isinstance(meals, list):
             continue
-        # keep if we have detail OR it is listed (detail may arrive later)
-        if c in details or c in from_menu or c in set(known):
-            seen.add(c)
-            merged.append(c)
+        for meal in meals:
+            if not isinstance(meal, dict):
+                continue
+            add(
+                meal.get("code") or meal.get("productCode"),
+                meal.get("name") or meal.get("productName"),
+                cname,
+                meal.get("tags"),
+                meal,
+            )
+    for code, meta in idx.items():
+        if not isinstance(meta, dict):
+            meta = {}
+        add(
+            code,
+            meta.get("name") or meta.get("productName"),
+            meta.get("category") or meta.get("categoryName") or "",
+            meta.get("tags"),
+            meta,
+        )
+    return out
+
+
+def _present_codes(menu: Dict[str, Any], details: Optional[Dict[str, Any]]) -> set:
+    present = {str(c) for c in ((menu or {}).get("mealIndex") or {})}
+    present |= {str(c) for c in (details or {})}
+    return present
+
+
+def _menu_product_name(menu: Dict[str, Any], code: str, detail: Optional[Dict[str, Any]] = None) -> str:
+    for product in iter_menu_products(menu):
+        if product["code"] == str(code) and product.get("name"):
+            return str(product["name"])
+    if detail:
+        return str(detail.get("name") or detail.get("productName") or "")
+    return ""
+
+
+def classify_dual_role(name: str, detail: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """双 1+1 角色：left_three / left_burger / right。
+
+    名称里的「真有料 / 三件套 / 双吉」优先；没有这些词时看 detail 轮次形状
+    （主食+饮品，或 3 轮三件套，对小食蛋白+配菜）。
+    """
+    label = str(name or "")
+    if "真有料" in label:
+        return "right"
+    if "三件套" in label:
+        return "left_three"
+    if "双吉" in label:
+        return "left_burger"
+    if not detail:
+        return None
+    try:
+        rounds = rounds_of(detail)
+    except ContractError:
+        return None
+    if not rounds:
+        return None
+    red, white = red_white(rounds)
+    red_choices = list(red.get("choices") or [])
+    white_choices = list(white.get("choices") or [])
+    n_main = sum(1 for choice in red_choices if is_mainish(choice))
+    n_side_red = sum(1 for choice in red_choices if is_sideish(choice) and not is_mainish(choice))
+    n_drink = sum(1 for choice in white_choices if is_drink(choice))
+    n_side_white = sum(1 for choice in white_choices if not is_drink(choice))
+    if n_main > 0 and n_drink > 0 and n_main >= n_side_red:
+        return "left_three" if len(rounds) >= 3 else "left_burger"
+    if n_main == 0 and (n_side_white > 0 or n_side_red > 0) and n_side_white >= n_drink:
+        return "right"
+    return None
+
+
+def _dual_signaled(product: Dict[str, Any]) -> bool:
+    if DUAL_SIGNAL_RE.search(product.get("category") or ""):
+        return True
+    if DUAL_SIGNAL_RE.search(product.get("name") or ""):
+        return True
+    return any(DUAL_SIGNAL_RE.search(tag) for tag in product.get("tags") or [])
+
+
+def _dual_rejected(name: str) -> bool:
+    return bool(SHARE_MEAL_RE.search(name) or OTHER_DEAL_RE.search(name))
+
+
+def _fallback_dual_legs(menu: Dict[str, Any], details: Dict[str, Any]) -> DualLegs:
+    present = _present_codes(menu, details)
+    right: List[str] = []
+    for code in _as_codes(FALLBACK_DUAL_RIGHT):
+        if code in present and code not in right:
+            right.append(code)
+    left: List[str] = []
+    for code in _as_codes(FALLBACK_DUAL_LEFT):
+        if code in present and code not in right and code not in left:
+            left.append(code)
+    roles: Dict[str, str] = {}
+    for code in right:
+        detail = details.get(code)
+        role = classify_dual_role(_menu_product_name(menu, code, detail), detail)
+        roles[code] = role or "right"
+    for code in left:
+        detail = details.get(code)
+        role = classify_dual_role(_menu_product_name(menu, code, detail), detail)
+        roles[code] = role or "left_burger"
+    return DualLegs(left, right, "fallback", roles)
+
+
+def discover_dual_legs(
+    menu: Dict[str, Any],
+    details: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> DualLegs:
+    """从「随心配 / 1+1」分类、名称或标签发现左/右腿。没有信号时才用退路码。"""
+    details = details or {}
+    signaled = [product for product in iter_menu_products(menu) if _dual_signaled(product)]
+    if not signaled:
+        return _fallback_dual_legs(menu, details)
+    left: List[str] = []
+    right: List[str] = []
+    roles: Dict[str, str] = {}
+    for product in signaled:
+        if _dual_rejected(product.get("name") or ""):
+            continue
+        code = product["code"]
+        detail = details.get(code)
+        name = product.get("name") or str((detail or {}).get("name") or (detail or {}).get("productName") or "")
+        role = classify_dual_role(name, detail)
+        if role == "right":
+            right.append(code)
+        elif role in ("left_three", "left_burger"):
+            left.append(code)
+        else:
+            continue
+        roles[code] = role
+    return DualLegs(left, right, "menu", roles)
+
+
+def discover_mcard_four_codes(
+    menu: Dict[str, Any],
+    details: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    """麦金卡分类（或名称/标签）里的四件套。分享餐排除。没有该信号时才退回已知码。"""
+    explicit = _as_codes((menu or {}).get("mcardFourProductCodes"))
+    explicit_set = set(explicit)
+    found: List[str] = []
+    seen = set()
+    saw_signal = bool(explicit)
+
+    def add(code: str) -> None:
+        if code and code not in seen:
+            seen.add(code)
+            found.append(code)
+
+    for product in iter_menu_products(menu):
+        category_hit = bool(
+            MCARD_CAT_RE.search(product.get("category") or "")
+            or any(MCARD_CAT_RE.search(tag) for tag in product.get("tags") or [])
+        )
+        name = str(product.get("name") or "")
+        name_mcard = bool(MCARD_CAT_RE.search(name))
+        if product["code"] in explicit_set:
+            add(product["code"])
+            continue
+        if not category_hit and not name_mcard:
+            continue
+        saw_signal = True
+        if SHARE_MEAL_RE.search(name) or DABAO_SIGNAL_RE.search(name):
+            continue
+        if DUAL_SIGNAL_RE.search(name) and not MCARD_FOUR_NAME_RE.search(name):
+            continue
+        if not MCARD_FOUR_NAME_RE.search(name):
+            continue
+        add(product["code"])
+    for code in explicit:
+        add(code)
+    if saw_signal:
+        return found
+    present = _present_codes(menu, details)
+    return [code for code in _as_codes(FALLBACK_MCARD_FOUR_CODES) if code in present]
+
+
+def discover_dabao_codes(
+    menu: Dict[str, Any],
+    details: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    """大堡口福分类或名称。双人/分享排除。没有该信号时才退回已知码。"""
+    found: List[str] = []
+    seen = set()
+    saw_signal = False
+    for product in iter_menu_products(menu):
+        name = str(product.get("name") or "")
+        hit = bool(
+            DABAO_SIGNAL_RE.search(product.get("category") or "")
+            or DABAO_SIGNAL_RE.search(name)
+            or any(DABAO_SIGNAL_RE.search(tag) for tag in product.get("tags") or [])
+        )
+        if not hit:
+            continue
+        saw_signal = True
+        if SHARE_MEAL_RE.search(name):
+            continue
+        if MCARD_FOUR_NAME_RE.search(name) or MCARD_CAT_RE.search(name) or DUAL_SIGNAL_RE.search(name):
+            continue
+        if product["code"] not in seen:
+            seen.add(product["code"])
+            found.append(product["code"])
+    if saw_signal:
+        return found
+    present = _present_codes(menu, details)
+    return [code for code in _as_codes(FALLBACK_DABAO_CODES) if code in present]
+
+
+def mcard_four_codes(menu: Dict[str, Any], details: Dict[str, Dict[str, Any]]) -> List[str]:
+    """当日可展开的麦金卡四件套，便宜的在前。名单来自菜单发现，不是写死的并集。"""
+    discovered = discover_mcard_four_codes(menu, details)
+    known = list(FALLBACK_MCARD_FOUR_CODES)
     idx = (menu or {}).get("mealIndex") or {}
 
     def price_key(code: str) -> Tuple[float, int, str]:
@@ -675,8 +943,14 @@ def mcard_four_codes(menu: Dict[str, Any], details: Dict[str, Dict[str, Any]]) -
             known_i = 99
         return (p, known_i, code)
 
-    # only emit codes we can expand now
-    return sorted([c for c in merged if c in details], key=price_key)
+    seen = set()
+    ordered: List[str] = []
+    for code in discovered:
+        if code in seen:
+            continue
+        seen.add(code)
+        ordered.append(code)
+    return sorted([code for code in ordered if code in details], key=price_key)
 
 
 def expand_mcard_four(
@@ -697,7 +971,7 @@ def expand_mcard_four(
     out: List[Dict[str, Any]] = []
     prefer_side_codes = [str(x) for x in (prefer_sides or [])]
     prefer_drink_codes = [str(x) for x in (prefer_drinks or [])]
-    ordered = mcard_four_codes(menu, details) or [c for c in MCARD_FOUR_CODES if c in details]
+    ordered = mcard_four_codes(menu, details)
     for code in ordered:
         det = details.get(code)
         if not det:
@@ -993,7 +1267,7 @@ def expand_coffee_combo(
     )
     # dabao with coffee：主食 → 小食轮 → 饮品轮里的咖啡
     side_pref = [str(x) for x in (prefer_sides or [])]
-    for code in DABAO_IDS:
+    for code in discover_dabao_codes(menu, details):
         det = details.get(code)
         if not det:
             continue
@@ -1030,10 +1304,14 @@ def expand_coffee_combo(
                     cand["rotationKey"] = f"cf{cand['rotationKey']}"
                     cand["id"] = cand["rotationKey"]
                     out.append(cand)
-    # dual 1+1 with coffee on drink leg (if available in white zone)
-    zl = details.get(DUAL11_RIGHT)
-    if zl:
-        for left_code in DUAL11_LEFT:
+    # dual 1+1 with coffee on the drink leg, using discovered left/right roles
+    legs = discover_dual_legs(menu, details)
+    seen_dual: set = set()
+    for right_code in legs.right:
+        zl = details.get(right_code)
+        if not zl:
+            continue
+        for left_code in legs.left:
             det = details.get(left_code)
             if not det:
                 continue
@@ -1043,7 +1321,7 @@ def expand_coffee_combo(
             sides = sorted(sides, key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]))[:3]
             right_mains = [c for c in zl_red["choices"] if is_sideish(c) or not is_mainish(c)][:4] or list(zl_red["choices"])[:4]
             left_mains = [c for c in red["choices"] if is_mainish(c)] or list(red["choices"])
-            base = price_for(left_code, menu) + price_for(DUAL11_RIGHT, menu)
+            base = price_for(left_code, menu) + price_for(right_code, menu)
             for main_a in left_mains[:4]:
                 for main_b in right_mains:
                     if main_a["code"] == main_b["code"]:
@@ -1060,14 +1338,73 @@ def expand_coffee_combo(
                         for coffee in coffees:
                             price = base + main_a["diffFen"] + main_b["diffFen"] + side["diffFen"] + coffee["diffFen"]
                             cand = build_dual(
-                                left_code, det, main_a, coffee, DUAL11_RIGHT, zl, main_b, side, price, ice_key
+                                left_code, det, main_a, coffee, right_code, zl, main_b, side, price, ice_key
                             )
                             cand["tags"] = list(dict.fromkeys((cand.get("tags") or []) + ["coffee", "coffee_combo"]))
                             cand["rotationKey"] = f"cf{cand['rotationKey']}"
                             cand["id"] = cand["rotationKey"]
-                            out.append(cand)
+                            _keep_dual(cand, seen_dual, out, left_code)
     return out
 
+
+
+def _keep_dual(
+    cand: Dict[str, Any],
+    seen: set,
+    out: List[Dict[str, Any]],
+    left_code: str,
+) -> None:
+    """保留一条双 1+1。两条左腿撞车时在 rotationKey 前加上左腿码，避免后写的整组被丢掉。"""
+    rk = str(cand.get("rotationKey") or "")
+    if rk in seen:
+        rk = f"{str(left_code)[-4:]}_{rk}"
+        cand["rotationKey"] = rk
+        cand["id"] = rk
+    if not rk or rk in seen:
+        return
+    seen.add(rk)
+    out.append(cand)
+
+
+def _dual_right_pools(
+    detail: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """真有料一类右腿：蛋白排序后最多 6 个，非饮配菜最多 5 个。"""
+    zl_red, zl_white = red_white(rounds_of(detail))
+    zl_sides = [c for c in zl_white["choices"] if not is_drink(c)]
+    zl_sides_sorted = sorted(
+        zl_sides,
+        key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]),
+    )[:5]
+    zl_mains_sideish = [c for c in zl_red["choices"] if is_sideish(c) or not is_mainish(c)]
+    zl_mains_all = list(zl_red["choices"])
+    right_mains: List[Dict[str, Any]] = []
+    for pool in (zl_mains_sideish, zl_mains_all):
+        for choice in pool:
+            if choice["code"] not in {item["code"] for item in right_mains}:
+                right_mains.append(choice)
+    # 优先琵琶腿/鸡排；麦乐鸡垫底（可作配，不当首选蛋白）
+    right_mains.sort(
+        key=lambda c: (
+            2 if c["code"] in FORBIDDEN_AS_MAIN_CODES or "麦乐鸡" in (c.get("name") or "") else 0,
+            0 if c["code"] in {"505416", "521156"} else 1,
+            c.get("diffFen") or 0,
+            c["code"],
+        )
+    )
+    return zl_red, zl_white, right_mains[:6], zl_sides_sorted
+
+
+def _dual_left_mains(red: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """左腿红区只要汉堡/卷。麦乐鸡、琵琶腿、鸡排不能当主堡。"""
+    left_mains = [c for c in red["choices"] if is_mainish(c)]
+    if left_mains:
+        return left_mains
+    return [
+        c
+        for c in red["choices"]
+        if c["code"] not in FORBIDDEN_AS_MAIN_CODES and not is_sideish(c)
+    ]
 
 
 def expand_dual_1plus1(
@@ -1077,118 +1414,129 @@ def expand_dual_1plus1(
     ice_key: str,
     budget_fen: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
+    """左腿（三件套/双吉）× 右腿（真有料）。腿来自菜单发现，不是写死的商品码。"""
     out: List[Dict[str, Any]] = []
     seen = set()
-    zl = details.get(DUAL11_RIGHT)
-    if not zl:
+    legs = discover_dual_legs(menu, details)
+    if not legs.left or not legs.right:
         return out
-    zl_red, zl_white = red_white(rounds_of(zl))
-    zl_sides = [c for c in zl_white["choices"] if not is_drink(c)]
-    zl_sides_sorted = sorted(
-        zl_sides,
-        key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]),
-    )[:5]
-    zl_mains_sideish = [c for c in zl_red["choices"] if is_sideish(c) or not is_mainish(c)]
-    zl_mains_all = list(zl_red["choices"])
-    right_mains = []
-    for pool in (zl_mains_sideish, zl_mains_all):
-        for c in pool:
-            if c["code"] not in {x["code"] for x in right_mains}:
-                right_mains.append(c)
-    # 真有料右腿：优先琵琶腿/鸡排等；麦乐鸡垫底（可作配，不当首选蛋白）
-    right_mains.sort(
-        key=lambda c: (
-            2 if c["code"] in FORBIDDEN_AS_MAIN_CODES or "麦乐鸡" in (c.get("name") or "") else 0,
-            0 if c["code"] in {"505416", "521156"} else 1,
-            c.get("diffFen") or 0,
-            c["code"],
-        )
-    )
-    right_mains = right_mains[:6]
 
-    for left_code in DUAL11_LEFT:
-        det = details.get(left_code)
-        if not det:
+    def remember(cand: Dict[str, Any], left_code: str) -> None:
+        _keep_dual(cand, seen, out, left_code)
+
+    for right_code in legs.right:
+        zl = details.get(right_code)
+        if not zl:
             continue
-        red, white = red_white(rounds_of(det))
-        # 左腿红区只要真汉堡/卷；禁止麦乐鸡/琵琶腿/鸡排当主堡
-        left_mains = [c for c in red["choices"] if is_mainish(c)]
-        if not left_mains:
-            # last resort: still skip nuggets
-            left_mains = [
-                c for c in red["choices"]
-                if c["code"] not in FORBIDDEN_AS_MAIN_CODES
-                and not is_sideish(c)
+        _zl_red, _zl_white, right_mains, zl_sides_sorted = _dual_right_pools(zl)
+        for left_code in legs.left:
+            det = details.get(left_code)
+            if not det:
+                continue
+            red, white = red_white(rounds_of(det))
+            left_mains = _dual_left_mains(red)
+            if not left_mains:
+                continue
+            base = price_for(left_code, menu) + price_for(right_code, menu)
+            for main_a in left_mains:
+                for main_b in right_mains:
+                    if main_a["code"] == main_b["code"]:
+                        continue
+                    if not (is_mainish(main_a) or is_mainish(main_b)):
+                        continue
+                    for side in zl_sides_sorted[:3]:
+                        drinks = select_drinks(
+                            white["choices"],
+                            prefer,
+                            False,
+                            base,
+                            [main_a, main_b, side],
+                            budget_fen,
+                        )
+                        for drink in drinks:
+                            price = (
+                                base
+                                + main_a["diffFen"]
+                                + main_b["diffFen"]
+                                + side["diffFen"]
+                                + drink["diffFen"]
+                            )
+                            remember(
+                                build_dual(
+                                    left_code,
+                                    det,
+                                    main_a,
+                                    drink,
+                                    right_code,
+                                    zl,
+                                    main_b,
+                                    side,
+                                    price,
+                                    ice_key,
+                                ),
+                                left_code,
+                            )
+
+    # 右腿红区里若有真汉堡，可与双吉左腿对调（三件套左腿不走这条，避免把薯条轮当配菜腿）。
+    for right_code in legs.right:
+        zl = details.get(right_code)
+        if not zl:
+            continue
+        zl_red, zl_white = red_white(rounds_of(zl))
+        protein_mains = [c for c in zl_red["choices"] if is_mainish(c)]
+        if not protein_mains:
+            continue
+        for left_code in legs.left:
+            if legs.roles.get(left_code) == "left_three":
+                continue
+            sj = details.get(left_code)
+            if not sj:
+                continue
+            sj_red, sj_white = red_white(rounds_of(sj))
+            sj_sides = [c for c in sj_white["choices"] if not is_drink(c)]
+            sj_sides = sorted(
+                sj_sides,
+                key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]),
+            )[:3]
+            side_mains = [c for c in sj_red["choices"] if is_sideish(c)] or [
+                c for c in sj_red["choices"] if c["code"] != "1120"
             ]
-        if not left_mains:
-            continue
-        base = price_for(left_code, menu) + price_for(DUAL11_RIGHT, menu)
-        for main_a in left_mains:
-            for main_b in right_mains:
-                if main_a["code"] == main_b["code"]:
-                    continue
-                if not (is_mainish(main_a) or is_mainish(main_b)):
-                    continue
-                for side in zl_sides_sorted[:3]:
-                    drinks = select_drinks(
-                        white["choices"],
-                        prefer,
-                        False,
-                        base,
-                        [main_a, main_b, side],
-                        budget_fen,
-                    )
-                    for drink in drinks:
-                        price = (
-                            base
-                            + main_a["diffFen"]
-                            + main_b["diffFen"]
-                            + side["diffFen"]
-                            + drink["diffFen"]
+            if not side_mains:
+                continue
+            base = price_for(right_code, menu) + price_for(left_code, menu)
+            for main_a in protein_mains[:5]:
+                for main_b in side_mains[:5]:
+                    if main_a["code"] == main_b["code"]:
+                        continue
+                    for side in sj_sides[:2]:
+                        drinks = select_drinks(
+                            zl_white["choices"],
+                            prefer,
+                            False,
+                            base,
+                            [main_a, main_b, side],
+                            budget_fen,
                         )
-                        cand = build_dual(
-                            left_code, det, main_a, drink, DUAL11_RIGHT, zl, main_b, side, price, ice_key
-                        )
-                        if cand["rotationKey"] in seen:
-                            continue
-                        seen.add(cand["rotationKey"])
-                        out.append(cand)
-
-    sj = details.get("9900016655")
-    if zl and sj:
-        sj_red, sj_white = red_white(rounds_of(sj))
-        sj_sides = [c for c in sj_white["choices"] if not is_drink(c)]
-        sj_sides = sorted(sj_sides, key=lambda c: (0 if c["code"] in NON_DRINK_WHITE else 1, c["code"]))[:3]
-        left_mains = [c for c in zl_red["choices"] if is_mainish(c)]
-        right_mains = [c for c in sj_red["choices"] if is_sideish(c)] or [
-            c for c in sj_red["choices"] if c["code"] != "1120"
-        ]
-        base = price_for(DUAL11_RIGHT, menu) + price_for("9900016655", menu)
-        for main_a in left_mains[:5]:
-            for main_b in right_mains[:5]:
-                if main_a["code"] == main_b["code"]:
-                    continue
-                for side in sj_sides[:2]:
-                    drinks = select_drinks(
-                        zl_white["choices"],
-                        prefer,
-                        False,
-                        base,
-                        [main_a, main_b, side],
-                        budget_fen,
-                    )
-                    for zl_drink in drinks:
-                        price = base + main_a["diffFen"] + main_b["diffFen"] + zl_drink["diffFen"]
-                        cand = build_dual(
-                            DUAL11_RIGHT, zl, main_a, zl_drink, "9900016655", sj, main_b, side, price, ice_key
-                        )
-                        cand["rotationKey"] = f"zl{main_a['code']}+sj{main_b['code']}_w{side['code']}_{zl_drink['code']}"
-                        cand["id"] = cand["rotationKey"]
-                        cand["primaryMainCode"] = main_a["code"]
-                        if cand["rotationKey"] in seen:
-                            continue
-                        seen.add(cand["rotationKey"])
-                        out.append(cand)
+                        for zl_drink in drinks:
+                            price = base + main_a["diffFen"] + main_b["diffFen"] + zl_drink["diffFen"]
+                            cand = build_dual(
+                                right_code,
+                                zl,
+                                main_a,
+                                zl_drink,
+                                left_code,
+                                sj,
+                                main_b,
+                                side,
+                                price,
+                                ice_key,
+                            )
+                            cand["rotationKey"] = (
+                                f"zl{main_a['code']}+sj{main_b['code']}_w{side['code']}_{zl_drink['code']}"
+                            )
+                            cand["id"] = cand["rotationKey"]
+                            cand["primaryMainCode"] = main_a["code"]
+                            remember(cand, left_code)
     return out
 
 
@@ -1203,7 +1551,7 @@ def expand_dabao(
     out: List[Dict[str, Any]] = []
     seen = set()
     side_pref = [str(x) for x in (prefer_sides or [])]
-    for code in DABAO_IDS:
+    for code in discover_dabao_codes(menu, details):
         det = details.get(code)
         if not det:
             continue
@@ -1270,8 +1618,14 @@ def discover_classic_three_codes(
             if "精选单人" in cname or CLASSIC_THREE_NAME_RE.search(str(m.get("name") or "")):
                 cat_codes.append(code)
 
-    known_other = set(MCARD_FOUR_CODES) | set(DUAL11_LEFT) | {DUAL11_RIGHT} | set(DABAO_IDS)
-    known_other |= set((menu or {}).get("mcardFourProductCodes") or [])
+    legs = discover_dual_legs(menu, details)
+    known_other = set(_as_codes(FALLBACK_MCARD_FOUR_CODES))
+    known_other |= set(_as_codes(FALLBACK_DUAL_LEFT)) | set(_as_codes(FALLBACK_DUAL_RIGHT))
+    known_other |= set(_as_codes(FALLBACK_DABAO_CODES))
+    known_other |= set(discover_mcard_four_codes(menu, details))
+    known_other |= set(legs.left) | set(legs.right)
+    known_other |= set(discover_dabao_codes(menu, details))
+    known_other |= set(_as_codes((menu or {}).get("mcardFourProductCodes")))
 
     scored: List[Tuple[int, float, int, str]] = []  # prefer_fish, price, has_detail, code
     seen = set()
@@ -1476,6 +1830,159 @@ def expand(
     return out
 
 
+def _matches_family(family: str, tags: set) -> bool:
+    if family == "mcard_four":
+        return bool(tags & {"mcard_four", "mcard"})
+    if family == "dual_1plus1":
+        return "dual11" in tags or "dual_1plus1" in tags
+    if family == "dabao":
+        return "dabao" in tags
+    if family == "classic_three":
+        return bool(tags & {"classic_three", "three_piece"})
+    if family == "coffee_combo":
+        return bool(tags & {"coffee", "coffee_combo"})
+    return False
+
+
+def _family_of(cand: Dict[str, Any], families: Sequence[str]) -> str:
+    tags = set(cand.get("tags") or [])
+    for family in families:
+        if _matches_family(family, tags):
+            return family
+    for family in ("mcard_four", "dual_1plus1", "dabao", "classic_three", "coffee_combo"):
+        if _matches_family(family, tags):
+            return family
+    return "other"
+
+
+def _deal_anchor(cand: Dict[str, Any]) -> str:
+    """分层裁剪用的套餐码。双 1+1 取左腿（items[0]），麦金卡/大堡/三件套取套餐本身。"""
+    for item in cand.get("items") or []:
+        if isinstance(item, dict) and item.get("productCode"):
+            return str(item["productCode"])
+    return "main:" + str(cand.get("primaryMainCode") or "")
+
+
+def _trim_within_key(cand: Dict[str, Any]) -> Tuple[int, int, str]:
+    tags = cand.get("tags") or []
+    if "classic_three" in tags:
+        main = str(cand.get("primaryMainCode") or "")
+        bias = 0 if main == "1600" else 1 if main == "1010" else 2
+    else:
+        bias = 3
+    return (bias, int(cand.get("listPriceFen") or 0), str(cand.get("rotationKey") or ""))
+
+
+def trim_candidates(
+    cands: Sequence[Dict[str, Any]],
+    max_n: int,
+    families: Sequence[str],
+) -> List[Dict[str, Any]]:
+    """Cap the pool without letting one family, or one dual/mcard SKU, take every seat.
+
+    Classic three still reserves a few unique mains first. The remaining seats
+    round-robin across families, and within a family across deal product codes
+    (dual left leg, mcard four, dabao, classic). Per-main caps stay as before.
+    """
+    if max_n <= 0 or not cands:
+        return []
+    fams = [str(f) for f in families]
+    trimmed: List[Dict[str, Any]] = []
+    seen = set()
+    per_main: Dict[str, int] = {}
+
+    def ident(cand: Dict[str, Any]) -> str:
+        return str(cand.get("rotationKey") or cand.get("id") or id(cand))
+
+    def push(cand: Dict[str, Any]) -> None:
+        trimmed.append(cand)
+        seen.add(ident(cand))
+        main = str(cand.get("primaryMainCode") or "")
+        per_main[main] = per_main.get(main, 0) + 1
+
+    def over_cap(cand: Dict[str, Any]) -> bool:
+        main = str(cand.get("primaryMainCode") or "")
+        count = per_main.get(main, 0)
+        if count >= 6:
+            return True
+        if count >= 4 and len(trimmed) >= min(40, max_n):
+            return True
+        return False
+
+    classics = sorted(
+        [c for c in cands if "classic_three" in set(c.get("tags") or [])],
+        key=_trim_within_key,
+    )
+    reserved_mains = set()
+    classic_reserved: List[Dict[str, Any]] = []
+    for cand in classics:
+        if len(classic_reserved) >= 10 or len(trimmed) + len(classic_reserved) >= max_n:
+            break
+        main = str(cand.get("primaryMainCode") or "")
+        if main in reserved_mains and len(classic_reserved) >= 8:
+            continue
+        if main not in reserved_mains or main in {"1600", "1010"}:
+            classic_reserved.append(cand)
+            reserved_mains.add(main)
+    for cand in classic_reserved:
+        if ident(cand) in seen or len(trimmed) >= max_n:
+            continue
+        push(cand)
+
+    buckets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for cand in cands:
+        if ident(cand) in seen:
+            continue
+        family = _family_of(cand, fams)
+        buckets.setdefault(family, {}).setdefault(_deal_anchor(cand), []).append(cand)
+
+    ordered_fams = [family for family in fams if family in buckets]
+    for family in buckets:
+        if family not in ordered_fams:
+            ordered_fams.append(family)
+    rows: Dict[str, List[Tuple[str, List[Dict[str, Any]]]]] = {}
+    indexes: Dict[str, List[int]] = {}
+    pointers: Dict[str, int] = {}
+    for family in ordered_fams:
+        family_rows = []
+        for anchor in sorted(buckets[family]):
+            family_rows.append((anchor, sorted(buckets[family][anchor], key=_trim_within_key)))
+        rows[family] = family_rows
+        indexes[family] = [0] * len(family_rows)
+        pointers[family] = 0
+
+    def take_one(family: str) -> bool:
+        family_rows = rows[family]
+        count = len(family_rows)
+        if count == 0:
+            return False
+        for step in range(count):
+            anchor_i = (pointers[family] + step) % count
+            bucket = family_rows[anchor_i][1]
+            idx = indexes[family][anchor_i]
+            while idx < len(bucket):
+                cand = bucket[idx]
+                idx += 1
+                if ident(cand) in seen or over_cap(cand):
+                    continue
+                indexes[family][anchor_i] = idx
+                pointers[family] = (anchor_i + 1) % count
+                push(cand)
+                return True
+            indexes[family][anchor_i] = idx
+        return False
+
+    progressed = True
+    while len(trimmed) < max_n and progressed:
+        progressed = False
+        for family in ordered_fams:
+            if len(trimmed) >= max_n:
+                break
+            if take_one(family):
+                progressed = True
+    return trimmed
+
+
 def tag_new_candidates(cands: List[Dict[str, Any]], menu: Dict[str, Any], prefs: Dict[str, Any]) -> None:
     import re
     rx_raw = prefs.get("newTagRegex") or r"(上新|全新|新升级|新品|首发)"
@@ -1590,75 +2097,7 @@ def main() -> int:
     except ContractError as exc:
         raise SystemExit(f"input contract error: {exc}") from exc
 
-    # trim: prefer families that appear earlier in prefs.priority / families list
-    pri = [str(x) for x in ((base.get("prefs") or {}).get("priority") or [])]
-    def fam_rank(c: Dict[str, Any]) -> int:
-        tags = set(c.get("tags") or [])
-        order = []
-        for i, f in enumerate(families):
-            if f == "mcard_four" and tags & {"mcard_four", "mcard"}:
-                order.append(i)
-            if f == "dual_1plus1" and "dual11" in tags:
-                order.append(i)
-            if f == "dabao" and "dabao" in tags:
-                order.append(i)
-            if f == "classic_three" and tags & {"classic_three", "three_piece"}:
-                order.append(i)
-            if f == "coffee_combo" and tags & {"coffee", "coffee_combo"}:
-                order.append(i)
-        return min(order) if order else 99
-
-    per_main: Dict[str, int] = {}
-    trimmed: List[Dict[str, Any]] = []
-    cands_sorted = sorted(
-        cands,
-        key=lambda c: (
-            fam_rank(c),
-            0 if "mcard_four" in (c.get("tags") or []) else 1,
-            0 if "dual11" in (c.get("tags") or []) else 1,
-            # within classic_three, prefer underrepresented mains (鱼/吉士包)
-            (0 if str(c.get("primaryMainCode") or "") == "1600" else 1 if str(c.get("primaryMainCode") or "") == "1010" else 2)
-                if "classic_three" in (c.get("tags") or []) else 3,
-            c.get("listPriceFen") or 0,
-            c.get("rotationKey"),
-        ),
-    )
-    # Pass A: guarantee classic_three coverage (esp. unique mains) before per-main caps fill
-    classic_reserved: List[Dict[str, Any]] = []
-    seen_classic_main = set()
-    for c in cands_sorted:
-        tags = set(c.get("tags") or [])
-        if "classic_three" not in tags:
-            continue
-        mc = str(c.get("primaryMainCode") or "")
-        if mc in seen_classic_main and len(classic_reserved) >= 8:
-            continue
-        if mc not in seen_classic_main or mc in {"1600", "1010"}:
-            classic_reserved.append(c)
-            seen_classic_main.add(mc)
-        if len(classic_reserved) >= 10:
-            break
-    for c in classic_reserved:
-        rk = c.get("rotationKey")
-        if any(x.get("rotationKey") == rk for x in trimmed):
-            continue
-        mc = str(c.get("primaryMainCode") or "")
-        trimmed.append(c)
-        per_main[mc] = per_main.get(mc, 0) + 1
-
-    for c in cands_sorted:
-        if len(trimmed) >= args.max:
-            break
-        rk = c.get("rotationKey")
-        if any(x.get("rotationKey") == rk for x in trimmed):
-            continue
-        mc = str(c.get("primaryMainCode") or "")
-        if per_main.get(mc, 0) >= 4 and len(trimmed) >= min(40, args.max):
-            continue
-        if per_main.get(mc, 0) >= 6:
-            continue
-        trimmed.append(c)
-        per_main[mc] = per_main.get(mc, 0) + 1
+    trimmed = trim_candidates(cands, int(args.max), families)
 
     out = deepcopy(base)
     # strip internal keys
