@@ -509,6 +509,147 @@ class OfflineContractTest(unittest.TestCase):
         self.assertTrue(all(c["drinkCodes"] == ["3050"] for c in cands))
         self.assertIn("515106", cands[0]["sideCodes"])
 
+    def test_iter_side_combos_rotates_past_first_side(self):
+        # 深度优先会把 8 个名额用在前两种第一小食 × 全部第二小食上，
+        # 玉米杯、香芋派虽然留在池子里也进不了候选。
+        from build_candidates import iter_side_combos
+
+        def pool(round_id, items):
+            rnd = {"id": round_id, "name": "小食"}
+            choices = [{"code": code, "name": name} for code, name in items]
+            return rnd, choices
+
+        first = [
+            ("1401", "麦乐鸡5块"),
+            ("1402", "麦乐鸡10块"),
+            ("4437", "玉米杯"),
+            ("4106", "香芋派"),
+        ]
+        second = [
+            ("515106", "麦乐鸡4块"),
+            ("515107", "麦乐鸡6块"),
+            ("515108", "麦乐鸡8块"),
+            ("520001", "香辣鸡翅"),
+        ]
+        pools = [pool("2", first), pool("3", second)]
+        combos = iter_side_combos(pools, 8, lambda _chs: True)
+        again = iter_side_combos(pools, 8, lambda _chs: True)
+        pairs = [(c[0][1]["code"], c[1][1]["code"]) for c in combos]
+        self.assertEqual(
+            [(c[0][1]["code"], c[1][1]["code"]) for c in again],
+            pairs,
+        )
+        self.assertEqual(
+            pairs,
+            [
+                ("1401", "515106"),
+                ("1402", "515107"),
+                ("4437", "515108"),
+                ("4106", "520001"),
+                ("1401", "515107"),
+                ("1402", "515108"),
+                ("4437", "520001"),
+                ("4106", "515106"),
+            ],
+        )
+        first_sides = {a for a, _b in pairs}
+        self.assertEqual(first_sides, {"1401", "1402", "4437", "4106"})
+        self.assertIn(("4437", "520001"), pairs)
+        self.assertIn(("4106", "520001"), pairs)
+
+        # 未截断时组合必须齐全，只是顺序不同。
+        full = iter_side_combos(pools, 16, lambda _chs: True)
+        self.assertEqual(len(full), 16)
+        self.assertEqual(len({(c[0][1]["code"], c[1][1]["code"]) for c in full}), 16)
+
+        # accept 为假不占名额，被拒的靠前项不会挡住更后的第一小食。
+        skipped = iter_side_combos(
+            pools,
+            3,
+            lambda chs: chs[0]["code"] != "1401",
+        )
+        skipped_pairs = [(c[0][1]["code"], c[1][1]["code"]) for c in skipped]
+        self.assertEqual(len(skipped_pairs), 3)
+        self.assertTrue(all(a != "1401" for a, _b in skipped_pairs))
+        self.assertIn("4106", {a for a, _b in skipped_pairs})
+
+        # 三轮时深度优先的前 8 个会停在第一种第一小食上。
+        third = [("9001", "中薯条"), ("9002", "玉米杯"), ("9003", "香芋派")]
+        wide = iter_side_combos(
+            [pool("2", first[:3]), pool("3", second[:3]), pool("4", third)],
+            8,
+            lambda _chs: True,
+        )
+        wide_first = {c[0][1]["code"] for c in wide}
+        self.assertEqual(wide_first, {"1401", "1402", "4437"})
+        self.assertLessEqual(len(wide), 8)
+
+        self.assertEqual(iter_side_combos([], 8, lambda _chs: True), [[]])
+        self.assertEqual(iter_side_combos(pools, 0, lambda _chs: True), [])
+
+    def test_mcard_four_keeps_later_first_side_under_combo_cap(self):
+        from build_candidates import expand_mcard_four
+
+        def choice(code, name, diff="+¥0.00"):
+            return {"code": code, "name": name, "diffPrice": diff}
+
+        # 产品码排序后，前两种第一小食是麦乐鸡；玉米杯和香芋派在池内但靠后。
+        # 第二轮有 4 项，深度优先的前 8 组到不了 4437 / 4106。
+        detail = {
+            "name": "人气超值四件套随心选",
+            "rounds": [
+                {"id": "1", "name": "主食", "choices": [choice("1100", "巨无霸")]},
+                {
+                    "id": "2",
+                    "name": "小食",
+                    "choices": [
+                        choice("1401", "麦乐鸡5块"),
+                        choice("1402", "麦乐鸡10块"),
+                        choice("4437", "玉米杯"),
+                        choice("4106", "香芋派"),
+                    ],
+                },
+                {
+                    "id": "3",
+                    "name": "小食",
+                    "choices": [
+                        choice("515106", "麦乐鸡4块"),
+                        choice("515107", "麦乐鸡6块"),
+                        choice("515108", "麦乐鸡8块"),
+                        choice("520001", "香辣鸡翅"),
+                    ],
+                },
+                {"id": "4", "name": "饮料", "choices": [choice("3050", "雪碧中杯")]},
+            ],
+        }
+        menu = {"mealIndex": {"9900004236": {"name": detail["name"], "currentPrice": 28}}}
+        cands = expand_mcard_four(
+            {"9900004236": detail},
+            menu,
+            ["3050"],
+            "0-0",
+            False,
+            budget_fen=3500,
+        )
+        pairs = {tuple(c["sideCodes"]) for c in cands}
+        self.assertEqual(len(cands), 8)
+        self.assertEqual(len(pairs), 8)
+        first_sides = {pair[0] for pair in pairs}
+        self.assertEqual(first_sides, {"1401", "1402", "4437", "4106"})
+        self.assertIn(("4437", "520001"), pairs)
+        self.assertIn(("4106", "520001"), pairs)
+        dfs_prefix = {
+            ("1401", "515106"),
+            ("1401", "515107"),
+            ("1401", "515108"),
+            ("1401", "520001"),
+            ("1402", "515106"),
+            ("1402", "515107"),
+            ("1402", "515108"),
+            ("1402", "520001"),
+        }
+        self.assertTrue(pairs - dfs_prefix)
+
     def test_recent_second_side_and_drink_downweight(self):
         from build_candidates import expand_mcard_four
 
