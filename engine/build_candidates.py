@@ -1354,7 +1354,11 @@ def _keep_dual(
     out: List[Dict[str, Any]],
     left_code: str,
 ) -> None:
-    """保留一条双 1+1。两条左腿撞车时在 rotationKey 前加上左腿码，避免后写的整组被丢掉。"""
+    """保留一条双 1+1。两条左腿撞车时在 rotationKey 前加上左腿码，避免后写的整组被丢掉。
+
+    ``dualLeftCode`` 是裁剪锚点。burger-swap 会把真有料放进 items[0]，不能靠商品顺序认左腿。
+    """
+    cand["dualLeftCode"] = str(left_code)
     rk = str(cand.get("rotationKey") or "")
     if rk in seen:
         rk = f"{str(left_code)[-4:]}_{rk}"
@@ -1519,6 +1523,7 @@ def expand_dual_1plus1(
                         )
                         for zl_drink in drinks:
                             price = base + main_a["diffFen"] + main_b["diffFen"] + zl_drink["diffFen"]
+                            # 这里的 items[0] 是真有料。左腿码交给 _keep_dual，裁剪不能看第一项。
                             cand = build_dual(
                                 right_code,
                                 zl,
@@ -1855,8 +1860,60 @@ def _family_of(cand: Dict[str, Any], families: Sequence[str]) -> str:
     return "other"
 
 
+def _item_code(item: Dict[str, Any]) -> str:
+    return str(item.get("productCode") or "")
+
+
+def _dual_items(cand: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        item
+        for item in (cand.get("items") or [])
+        if isinstance(item, dict) and _item_code(item)
+    ]
+
+
+def _dual_left_product_code(cand: Dict[str, Any]) -> Optional[str]:
+    """双 1+1 左腿（三件套/双吉）商品码。burger-swap 时它不在 items[0]。"""
+    items = _dual_items(cand)
+    codes = [_item_code(item) for item in items]
+    stamped = str(cand.get("dualLeftCode") or "")
+    if stamped and stamped in codes:
+        return stamped
+
+    def name_of(item: Dict[str, Any]) -> str:
+        return str(item.get("productName") or "")
+
+    named_left = [
+        item
+        for item in items
+        if ("三件套" in name_of(item) or "双吉" in name_of(item)) and "真有料" not in name_of(item)
+    ]
+    if len(named_left) == 1:
+        return _item_code(named_left[0])
+    named_right = [item for item in items if "真有料" in name_of(item)]
+    if len(named_right) == 1 and len(items) >= 2:
+        others = [item for item in items if item is not named_right[0]]
+        if len(others) == 1:
+            return _item_code(others[0])
+    return None
+
+
+def _is_dual_candidate(cand: Dict[str, Any]) -> bool:
+    tags = set(cand.get("tags") or [])
+    return bool(tags & {"dual11", "dual_1plus1"})
+
+
 def _deal_anchor(cand: Dict[str, Any]) -> str:
-    """分层裁剪用的套餐码。双 1+1 取左腿（items[0]），麦金卡/大堡/三件套取套餐本身。"""
+    """分层裁剪用的套餐码。
+
+    双 1+1 取左腿（三件套/双吉主食侧）商品码。burger-swap 会把右腿（真有料）
+    放进 items[0]，轮转和 ``--max`` 不能跟那一项。麦金卡、大堡口福、经典三件套
+    取套餐本身的商品码。
+    """
+    if _is_dual_candidate(cand):
+        left = _dual_left_product_code(cand)
+        if left:
+            return left
     for item in cand.get("items") or []:
         if isinstance(item, dict) and item.get("productCode"):
             return str(item["productCode"])
