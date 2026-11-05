@@ -513,6 +513,190 @@ class TrimDiversityTest(unittest.TestCase):
         mcard_codes = {product_codes(c)[0] for c in cands if "mcard_four" in (c.get("tags") or [])}
         self.assertTrue({"9900000884", "9900090001"} <= mcard_codes)
 
+    def test_swap_path_anchor_stays_on_left_leg_when_right_leg_leads(self):
+        """右腿红区有真汉堡时，burger-swap 把真有料放在 items[0]，锚点仍是左腿。"""
+        left_burger = "9900016655"
+        left_plain = "9900091001"
+        left_three = "9900016651"
+        right = "9900016668"
+        right_plain = "9900091002"
+        menu = {
+            "categories": [
+                {
+                    "name": "随心配1+1",
+                    "meals": [
+                        indexed(left_burger, "双吉随心配1+1", "13.90"),
+                        indexed(left_plain, "双吉随心配1+1新品", "13.90"),
+                        indexed(left_three, "随心配1+1三件套!!!", "21.90"),
+                        indexed(right, "真有料随心配1+1", "14.90"),
+                        indexed(right_plain, "真有料随心配1+1新品", "14.90"),
+                    ],
+                }
+            ],
+            "mealIndex": {
+                left_burger: {"name": "双吉随心配1+1", "currentPrice": "13.90"},
+                left_plain: {"name": "双吉随心配1+1新品", "currentPrice": "13.90"},
+                left_three: {"name": "随心配1+1三件套!!!", "currentPrice": "21.90"},
+                right: {"name": "真有料随心配1+1", "currentPrice": "14.90"},
+                right_plain: {"name": "真有料随心配1+1新品", "currentPrice": "14.90"},
+            },
+        }
+        burger_right = {
+            "name": "真有料随心配1+1",
+            "rounds": [
+                {
+                    "id": "1",
+                    "name": "红区",
+                    "choices": [choice("1100", "巨无霸"), choice("505416", "脆汁鸡琵琶腿")],
+                },
+                {
+                    "id": "2",
+                    "name": "白区",
+                    "choices": [choice("522021", "无糖可乐大杯"), choice("4105", "菠萝派")],
+                },
+            ],
+        }
+        burger_left = {
+            "name": "双吉随心配1+1",
+            "rounds": [
+                {
+                    "id": "1",
+                    "name": "红区",
+                    "choices": [choice("1120", "双层吉士汉堡"), choice("1401", "麦乐鸡5块")],
+                },
+                {
+                    "id": "2",
+                    "name": "饮料",
+                    "choices": [choice("522021", "无糖可乐大杯"), choice("4105", "菠萝派")],
+                },
+            ],
+        }
+        # 菜单名能认出左右腿，detail 不再带「双吉 / 真有料」，商品名不能当锚点。
+        plain_right = {
+            "rounds": [
+                {
+                    "id": "1",
+                    "name": "红区",
+                    "choices": [choice("1100", "巨无霸"), choice("505416", "脆汁鸡琵琶腿")],
+                },
+                {
+                    "id": "2",
+                    "name": "白区",
+                    "choices": [choice("3050", "雪碧中杯"), choice("4106", "香芋派")],
+                },
+            ],
+        }
+        plain_left = {
+            "rounds": [
+                {
+                    "id": "1",
+                    "name": "红区",
+                    "choices": [choice("1450", "麦香鸡"), choice("1401", "麦乐鸡5块")],
+                },
+                {
+                    "id": "2",
+                    "name": "饮料",
+                    "choices": [choice("3050", "雪碧中杯"), choice("4106", "香芋派")],
+                },
+            ],
+        }
+        details = {
+            left_burger: burger_left,
+            left_plain: plain_left,
+            left_three: dual_detail_6651(),
+            right: burger_right,
+            right_plain: plain_right,
+        }
+        cands = bc.expand_dual_1plus1(details, menu, ["522021", "3050"], "0-0", budget_fen=5000)
+
+        def swapped(pool, right_code):
+            return [c for c in pool if product_codes(c)[:1] == [right_code]]
+
+        named_swap = swapped(
+            [c for c in cands if left_burger in product_codes(c) and right in product_codes(c)],
+            right,
+        )
+        plain_swap = swapped(
+            [c for c in cands if left_plain in product_codes(c) and right_plain in product_codes(c)],
+            right_plain,
+        )
+        self.assertTrue(named_swap)
+        self.assertTrue(plain_swap)
+        for cand in named_swap:
+            self.assertEqual(product_codes(cand), [right, left_burger])
+            self.assertEqual(bc._deal_anchor(cand), left_burger)
+        for cand in plain_swap:
+            self.assertEqual(product_codes(cand), [right_plain, left_plain])
+            self.assertEqual(cand.get("dualLeftCode"), left_plain)
+            self.assertEqual(bc._deal_anchor(cand), left_plain)
+        lefts = {left_burger, left_plain, left_three}
+        rights = {right, right_plain}
+        for cand in cands:
+            codes = product_codes(cand)
+            anchor = bc._deal_anchor(cand)
+            self.assertIn(anchor, lefts)
+            self.assertIn(anchor, codes)
+            self.assertNotIn(anchor, rights)
+            if left_three in codes:
+                self.assertEqual(codes[0], left_three)
+                self.assertEqual(anchor, left_three)
+
+    def test_max_splits_seats_by_left_leg_when_items_lead_with_right(self):
+        """items 把真有料放前面时，--max 仍按两条左腿轮转，不合成一个右腿桶。"""
+        right = "9900016668"
+        left_a = "9900016655"
+        left_b = "9900016651"
+        left_c = "9900091001"
+        cands = []
+        for i in range(8):
+            cands.append(
+                {
+                    "rotationKey": f"a{i:02d}",
+                    "listPriceFen": 2800,
+                    "primaryMainCode": f"A{i}",
+                    "tags": ["dual11"],
+                    "items": [
+                        {"productCode": right, "productName": "真有料随心配1+1"},
+                        {"productCode": left_a, "productName": "双吉随心配1+1"},
+                    ],
+                }
+            )
+            cands.append(
+                {
+                    "rotationKey": f"b{i:02d}",
+                    "listPriceFen": 3690,
+                    "primaryMainCode": f"B{i}",
+                    "tags": ["dual11"],
+                    "items": [
+                        {"productCode": right, "productName": "真有料随心配1+1"},
+                        {"productCode": left_b, "productName": "随心配1+1三件套!!!"},
+                    ],
+                }
+            )
+            cands.append(
+                {
+                    "rotationKey": f"c{i:02d}",
+                    "listPriceFen": 3000,
+                    "primaryMainCode": f"C{i}",
+                    "tags": ["dual11"],
+                    "dualLeftCode": left_c,
+                    "items": [
+                        {"productCode": right, "productName": right},
+                        {"productCode": left_c, "productName": left_c},
+                    ],
+                }
+            )
+        for cand in cands:
+            self.assertEqual(bc._deal_anchor(cand), product_codes(cand)[1])
+            self.assertNotEqual(bc._deal_anchor(cand), right)
+
+        trimmed = bc.trim_candidates(cands, 9, ["dual_1plus1"])
+        anchors = [bc._deal_anchor(c) for c in trimmed]
+        self.assertEqual(anchors.count(left_a), 3)
+        self.assertEqual(anchors.count(left_b), 3)
+        self.assertEqual(anchors.count(left_c), 3)
+        self.assertNotIn(right, anchors)
+
 
 if __name__ == "__main__":
     unittest.main()
