@@ -140,6 +140,7 @@ def pick_drink(choices: List[Dict[str, Any]], prefer: List[str]) -> Optional[Dic
 
 
 # 每个主食下：小食轮各取若干、组合数与饮品数有上限，避免菜单笛卡尔积撑爆候选池。
+# 组合上限由 iter_side_combos 按轮转填充，不用深度优先把名额留给前几种第一小食。
 MAX_CHOICES_PER_SIDE_ROUND = 4
 MAX_SIDE_COMBOS_PER_MAIN = 8
 MAX_DRINKS_PER_SELECTION = 4
@@ -259,32 +260,57 @@ def side_pools(
     return pools
 
 
+def _iter_diverse_indexes(sizes: Sequence[int]):
+    """笛卡尔积的轮转顺序：每一轮的选项都尽早出现，而不是先耗尽第一项。
+
+    两轮时先走对角线 (0,0)、(1,1)、(2,2)…，再错一位。
+    更多轮时对后续轮次递归使用同一顺序，并相对第一轮下标错开。
+    每个下标组合恰好出现一次。
+    """
+    if not sizes:
+        yield ()
+        return
+    head = sizes[0]
+    if head <= 0:
+        return
+    if len(sizes) == 1:
+        for i in range(head):
+            yield (i,)
+        return
+    tail = list(_iter_diverse_indexes(sizes[1:]))
+    span = len(tail)
+    if span == 0:
+        return
+    for shift in range(span):
+        for i in range(head):
+            yield (i,) + tail[(shift + i) % span]
+
+
 def iter_side_combos(
     pools: Sequence[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
     max_combos: int,
     accept,
 ) -> List[List[Tuple[Dict[str, Any], Dict[str, Any]]]]:
-    """按轮次顺序做笛卡尔积；accept 为假的组合不占名额。"""
+    """按轮次取笛卡尔积，名额在各轮选项之间轮转；accept 为假的组合不占名额。
+
+    深度优先会让第一轮靠前的选项把上限吃光（8 个名额全落在麦乐鸡一类上），
+    菜单里更靠后的玉米、派、鸡翅进不了候选。这里按对角线轮转取样，
+    顺序只由各轮已经排好的选项决定。
+    """
     if not pools:
         return [[]]
+    if max_combos <= 0:
+        return []
+    sizes = [len(chs) for _, chs in pools]
+    if any(size <= 0 for size in sizes):
+        return []
     combos: List[List[Tuple[Dict[str, Any], Dict[str, Any]]]] = []
-
-    def rec(i: int, acc: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> None:
-        if len(combos) >= max_combos:
-            return
-        if i == len(pools):
-            if accept([ch for _, ch in acc]):
-                combos.append(list(acc))
-            return
-        _rnd, chs = pools[i]
-        for ch in chs:
-            acc.append((_rnd, ch))
-            rec(i + 1, acc)
-            acc.pop()
+    for indexes in _iter_diverse_indexes(sizes):
+        acc = [(pools[i][0], pools[i][1][idx]) for i, idx in enumerate(indexes)]
+        if accept([ch for _, ch in acc]):
+            combos.append(acc)
             if len(combos) >= max_combos:
-                return
-
-    rec(0, [])
+                break
     return combos
 
 
@@ -666,6 +692,7 @@ def expand_mcard_four(
 
     小食对和饮品都来自该套餐 detail 的可选项，不用写死的单一小食对或默认饮品。
     preferSideCodes / drink.preferCodes 只做软排序；超预算的组合丢掉。
+    小食组合达到上限时按轮转保留，不把名额留给第一种小食。
     """
     out: List[Dict[str, Any]] = []
     prefer_side_codes = [str(x) for x in (prefer_sides or [])]
