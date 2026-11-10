@@ -26,8 +26,9 @@ JSON money fields are **fen**; show **yuan** to the user. One-off overrides (bud
 1. **Load a profile** (or prefs file) before building/scoring. Do not bake product names, burger codes, or store codes into chat prompts as permanent defaults—read them from the profile.
 2. **Satiety, budget, drink/coffee, deal families, diversification, fulfillment**: driven by profile fields (`prefs`, `candidateFamilies`, `selection`, `mealPeriod`, `dining`/`storeCode`/`reservation`/…). Do not lock recommendations to one red-zone item or one store.
 3. **Always** `build_candidates.py --profile …` (or equivalent request with `candidates[]`) before `score_lunch.py`.
-4. **Price-check** chosen `items` with MCP `calculate-price` before quoting a total. `round` values are **strings**. Membership-only deals may fail at price/order—handle there; scripts do not verify membership.
+4. **Price-check** chosen `items` with MCP `calculate-price` before quoting a total. `round` values are **strings**. Membership-only deals may fail at price/order—handle there; scripts do not verify membership. Until that quote exists, describe the amount as 估价 (`priceState=estimate`); re-quote if the quote expired or the items/context changed.
 5. **Order**: show summary + yuan; wait for an explicit yes before `create-order`. Routines must not auto-order.
+6. When the user names a combo or swaps a side, re-derive the summary from the same `roundList` and price state (`engine/combo_edit.py`); do not keep a stale side with a new total, and do not auto-pick each round's first zero-price option.
 
 ## Fulfillment (from profile only)
 
@@ -77,5 +78,8 @@ MCP menu/detail has **no** `isNew` field. Prefer menu `tags`（上新/全新…�
 
 ## Notes
 
-- Scripts never call MCP and never create-order.
+- Scripts never call MCP and never create-order. Cache, exposure log and stage timing are offline file helpers only; there is no standing service.
+- Price state is explicit: `estimate` / `quoted` / `stale`. Never present an estimate or an expired quote as 实付; a live `calculate-price` is required before asking the user to confirm.
+- Exposure, skip, swap and deal are separate tracks. A skip is never written as a deal and never asserted as "user dislikes this". Pass `exposurePath` only if the caller actually records exposures.
 - Forbidden: secrets in this repository, standing HTTP service for this, auto-order, assistant-specific store/drink/SKU hardcodes in this skill body.
+- Wrapper recovery, scheduling and MCP calls live outside this repository; see [../docs/observability-and-integration.md](../docs/observability-and-integration.md).

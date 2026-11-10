@@ -3,7 +3,10 @@ __pycache__/
 engine/runs/history/
 engine/runs/*.json
 engine/runs/*.txt
+engine/runs/*.jsonl
 engine/runs/research/
+engine/runs/cache/
+engine/runs/timings/
 .env
 .venv/
 *.bak
