@@ -151,7 +151,7 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 - 有报价时按 `payableFen` 判定，可产生 `over_budget_payable`
 - 无报价时仅当商品价已超预算才拒绝，否则放行但标记 `needsQuoteBeforeConfirm`
 
-调用方可将 `calculate-price` 的结果按 `rotationKey` 回填到请求的 `priceQuotes`，引擎据此覆盖商品价并写入实付价。
+调用方可将 `calculate-price` 的结果按 `rotationKey` 回填到请求的 `priceQuotes`。只有报价带有时间、未过期、items 与候选一致，且请求里已填的门店/履约/预约与报价一致时，才会写入实付；否则保持估价。
 
 ### 历史格式
 
@@ -203,6 +203,7 @@ query-meals → query-meal-detail（按 candidateFamilies）
 ```
 
 - 预约场景需带物化后的 `reservationDate` 与外送参数；外送不要复用堂食菜单缓存
+- `mcp_cache`、`stage_timer`、`combo_edit` 以及曝光日志都要调用方显式使用。当前例程未接入，不能把它们说成已经在午餐或早餐流程里生效
 - 会员资格导致的算价或下单失败由调用方处理，引擎不校验会员状态
 - 本仓库脚本禁止 `create-order`，也不提供常驻 HTTP 服务
 

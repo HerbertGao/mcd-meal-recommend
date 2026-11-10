@@ -15,15 +15,18 @@ Isolation key (all fields matter, none default to "any"):
     beCode          delivery business code ("" for eat-in)
     addressId       delivery address ("" for eat-in)
     productCode     detail only
-    menuFingerprint menu payload hash; detail entries are invalidated by it
+    menuFingerprint detail only; required. Different menus are different keys.
 
 Invalidation rules:
 
 * expired by TTL or explicit ``expiresAt``
-* written while a different context was active (context fields differ)
-* a newer menu payload exists (``menuFingerprint`` differs for details)
-* the caller recorded a failure for the entry (``fail``)
-* the payload is unreadable or fails the caller's validator
+* any isolation field differs, including ``menuFingerprint`` (separate files)
+* stored metadata disagrees with the lookup key (treated as ``context_changed``)
+* the caller recorded a failure for the entry (``fail``), including a corrupt tombstone
+* the entry is unreadable, fails its payload fingerprint, or fails the caller's validator
+
+A detail lookup that omits ``menuFingerprint`` is rejected. It is not a wildcard
+and must not reuse a detail captured under another menu.
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ KEY_FIELDS = (
     "beCode",
     "addressId",
     "productCode",
+    "menuFingerprint",
 )
 
 
@@ -98,10 +102,24 @@ class CacheKey:
     def __post_init__(self) -> None:
         if self.kind not in (KIND_MENU, KIND_DETAIL):
             raise ValueError(f"unsupported cache kind: {self.kind!r}")
-        if not str(self.store_code or "").strip():
+        store = str(self.store_code or "").strip()
+        if not store:
             raise ValueError("cache key requires storeCode")
-        if self.kind == KIND_DETAIL and not str(self.product_code or "").strip():
-            raise ValueError("detail cache key requires productCode")
+        object.__setattr__(self, "store_code", store)
+        if self.kind == KIND_DETAIL:
+            product = str(self.product_code or "").strip()
+            menu_fp = str(self.menu_fingerprint or "").strip()
+            if not product:
+                raise ValueError("detail cache key requires productCode")
+            if not menu_fp:
+                raise ValueError("detail cache key requires menuFingerprint")
+            object.__setattr__(self, "product_code", product)
+            object.__setattr__(self, "menu_fingerprint", menu_fp)
+        else:
+            # Menu entries are the menu. A product code or fingerprint here would
+            # either fragment one menu or let a detail key alias it.
+            object.__setattr__(self, "product_code", "")
+            object.__setattr__(self, "menu_fingerprint", "")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "CacheKey":
@@ -119,7 +137,12 @@ class CacheKey:
         )
 
     def scope(self) -> Dict[str, str]:
-        """Dimensions that must match between write and read."""
+        """Dimensions that must match between write and read.
+
+        ``menuFingerprint`` is part of the detail key, so two menus never share
+        one file. Menu entries store an empty fingerprint; they are not looked
+        up by it.
+        """
         return {
             "kind": self.kind,
             "storeCode": self.store_code,
@@ -129,6 +152,7 @@ class CacheKey:
             "beCode": self.be_code,
             "addressId": self.address_id,
             "productCode": self.product_code,
+            "menuFingerprint": self.menu_fingerprint,
         }
 
     def label(self) -> str:
@@ -179,15 +203,14 @@ class SnapshotCache:
     def tombstone_path(self, key: CacheKey) -> Path:
         return key.dirname(self.root) / "failed.json"
 
-    def _read_json(self, path: Path) -> Optional[Any]:
+    def _read_json_status(self, path: Path) -> tuple:
+        """Return ``(missing|ok|corrupt, data)``. A bad file is not a miss."""
+        if not path.exists():
+            return "missing", None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return "ok", json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return None
-
-    def _fail_state(self, key: CacheKey) -> Optional[Dict[str, Any]]:
-        data = self._read_json(self.tombstone_path(key))
-        return data if isinstance(data, dict) else None
+            return "corrupt", None
 
     def get(
         self,
@@ -198,34 +221,39 @@ class SnapshotCache:
         validator: Optional[Callable[[Any], bool]] = None,
     ) -> CacheResult:
         now = now or _now()
-        failed = self._fail_state(key)
-        if failed:
-            return CacheResult(
-                "invalidated",
-                entry_meta={"failedAt": failed.get("at"), "error": failed.get("error")},
-                reason="previous_error",
-            )
+        tomb_state, tomb = self._read_json_status(self.tombstone_path(key))
+        entry_state, entry = self._read_json_status(self.entry_path(key))
+        meta: Dict[str, Any] = {}
+        written = None
+        if entry_state == "ok" and isinstance(entry, dict) and isinstance(entry.get("meta"), dict):
+            meta = entry["meta"]
+            written = parse_ts(meta.get("writtenAt"))
 
-        path = self.entry_path(key)
-        entry = self._read_json(path)
-        if not isinstance(entry, dict):
+        if tomb_state == "corrupt" or (tomb_state == "ok" and not isinstance(tomb, dict)):
+            return CacheResult("invalidated", entry_meta=meta, reason="corrupt_tombstone")
+        if tomb_state == "ok" and isinstance(tomb, dict):
+            failed_at = parse_ts(tomb.get("at"))
+            # A newer successful put wins. An unreadable or older failure does not.
+            entry_is_newer = written is not None and failed_at is not None and written >= failed_at
+            if not entry_is_newer:
+                return CacheResult(
+                    "invalidated",
+                    entry_meta={"failedAt": tomb.get("at"), "error": tomb.get("error")},
+                    reason="previous_error",
+                )
+
+        if entry_state == "missing":
             return CacheResult("missing", reason="no_entry")
+        if entry_state == "corrupt" or not isinstance(entry, dict):
+            return CacheResult("error", entry_meta=meta, reason="corrupt_entry")
 
-        meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
         payload = entry.get("payload")
-
         stored_scope = {field_name: str(meta.get(field_name) or "") for field_name in key.scope()}
         if stored_scope != key.scope():
             diffs = sorted(name for name, val in key.scope().items() if stored_scope.get(name) != val)
             return CacheResult("context_changed", entry_meta=meta, reason=",".join(diffs) or "context")
 
-        if key.kind == KIND_DETAIL and key.menu_fingerprint:
-            stored_menu = str(meta.get("menuFingerprint") or "")
-            if stored_menu and stored_menu != key.menu_fingerprint:
-                return CacheResult("context_changed", entry_meta=meta, reason="menu_fingerprint")
-
         expires = parse_ts(meta.get("expiresAt"))
-        written = parse_ts(meta.get("writtenAt"))
         ttl = DEFAULT_TTL_SECONDS[key.kind] if ttl_seconds is None else int(ttl_seconds)
         if expires is not None and now > expires:
             return CacheResult("expired", entry_meta=meta, reason="expiresAt")
@@ -234,8 +262,16 @@ class SnapshotCache:
 
         if payload is None:
             return CacheResult("invalidated", entry_meta=meta, reason="empty_payload")
-        if validator is not None and not validator(payload):
-            return CacheResult("error", entry_meta=meta, reason="validator_rejected")
+        stored_fp = str(meta.get("payloadFingerprint") or "")
+        if not stored_fp or stored_fp != fingerprint(payload):
+            return CacheResult("error", entry_meta=meta, reason="payload_fingerprint_mismatch")
+        if validator is not None:
+            try:
+                accepted = bool(validator(payload))
+            except Exception:
+                return CacheResult("error", entry_meta=meta, reason="validator_error")
+            if not accepted:
+                return CacheResult("error", entry_meta=meta, reason="validator_rejected")
         return CacheResult("hit", payload=payload, entry_meta=meta, reason="")
 
     def put(
@@ -268,8 +304,10 @@ class SnapshotCache:
             json.dumps({"meta": meta, "payload": payload}, ensure_ascii=False),
             encoding="utf-8",
         )
-        tmp.replace(path)
+        # Drop the tombstone before publishing so a crash cannot leave a fresh
+        # entry permanently hidden behind the previous failure.
         self.tombstone_path(key).unlink(missing_ok=True)
+        tmp.replace(path)
         return path
 
     def fail(self, key: CacheKey, error: str, *, now: Optional[datetime] = None) -> Path:
@@ -289,26 +327,49 @@ class SnapshotCache:
         self.entry_path(key).unlink(missing_ok=True)
         self.tombstone_path(key).unlink(missing_ok=True)
 
+    def _entry_is_corrupt(self, data: Any) -> bool:
+        if not isinstance(data, dict):
+            return True
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        payload = data.get("payload")
+        stored_fp = str(meta.get("payloadFingerprint") or "")
+        if payload is None or not stored_fp:
+            return True
+        return stored_fp != fingerprint(payload)
+
     def prune(self, *, now: Optional[datetime] = None, keep_expired_seconds: int = 86400) -> int:
-        """Delete entries that were expired for longer than ``keep_expired_seconds``."""
+        """Delete corrupt entries and ones expired longer than ``keep_expired_seconds``.
+
+        Tombstones are kept. A failure still blocks that key until the next
+        successful ``put``; pruning must not turn a recorded error back into a hit.
+        """
         now = now or _now()
         removed = 0
-        for entry in self.root.glob("*/*/entry.json"):
-            data = self._read_json(entry)
-            meta = data.get("meta") if isinstance(data, dict) and isinstance(data.get("meta"), dict) else {}
-            expires = parse_ts(meta.get("expiresAt"))
-            if expires is None:
-                continue
-            if (now - expires).total_seconds() > keep_expired_seconds:
+        if not self.root.exists():
+            return 0
+        for entry in list(self.root.glob("*/*/entry.json")):
+            state, data = self._read_json_status(entry)
+            drop = state != "ok" or self._entry_is_corrupt(data)
+            if not drop and isinstance(data, dict):
+                meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+                expires = parse_ts(meta.get("expiresAt"))
+                if expires is not None and (now - expires).total_seconds() > keep_expired_seconds:
+                    drop = True
+            if drop:
                 entry.unlink(missing_ok=True)
                 removed += 1
         return removed
 
     def stats(self, *, now: Optional[datetime] = None) -> Dict[str, int]:
         now = now or _now()
-        counts = {"hit": 0, "expired": 0, "failed": 0}
+        counts = {"hit": 0, "expired": 0, "failed": 0, "corrupt": 0}
         for entry in self.root.glob("*/*/entry.json"):
-            data = self._read_json(entry)
+            if (entry.parent / "failed.json").exists():
+                continue
+            state, data = self._read_json_status(entry)
+            if state != "ok" or self._entry_is_corrupt(data):
+                counts["corrupt"] += 1
+                continue
             meta = data.get("meta") if isinstance(data, dict) and isinstance(data.get("meta"), dict) else {}
             expires = parse_ts(meta.get("expiresAt"))
             if expires is not None and now > expires:
@@ -334,6 +395,8 @@ def load_detail_cache(
     validator: Optional[Callable[[Any], bool]] = None,
 ) -> Dict[str, Any]:
     """Return ``{productCode: detail}`` for fresh, context-matching entries."""
+    if product_codes and not str(menu_fingerprint or "").strip():
+        raise ValueError("detail cache lookup requires menuFingerprint")
     out: Dict[str, Any] = {}
     for code in product_codes or []:
         key = CacheKey(
@@ -419,7 +482,11 @@ def main(argv: Optional[list] = None) -> int:
         print(json.dumps({"removed": removed}, ensure_ascii=False))
         return 0
 
-    key = build_key(args)
+    try:
+        key = build_key(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if args.cmd == "put":
         try:
             payload = json.loads(Path(args.payload).read_text(encoding="utf-8"))

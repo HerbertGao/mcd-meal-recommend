@@ -164,24 +164,33 @@ def check_quote(
         age = int((now - quoted_at).total_seconds())
     if expires_at is not None and now > expires_at:
         return QuoteCheck(False, "expired", age_seconds=age, expired=True)
+    # A timestamp far in the future never satisfies ``age > ttl``, so it would
+    # stay "fresh" indefinitely. Small clock skew is still accepted.
+    if age is not None and age < -120:
+        return QuoteCheck(False, "quote_time_in_future", age_seconds=age)
     if ttl > 0 and age is not None and age > ttl:
         return QuoteCheck(False, "expired", age_seconds=age, expired=True)
 
     if context:
         for key in _CONTEXT_KEYS:
             expected = str(context.get(key) or "")
+            if not expected:
+                continue
             actual = str(quote.get(key) or "")
-            if expected and actual and expected != actual:
+            # A request field the quote omits is not a match: an eat-in quote
+            # must not confirm a delivery order, and the reverse.
+            if actual != expected:
                 return QuoteCheck(False, f"context_mismatch:{key}", age_seconds=age)
 
     quoted_items = _quote_items(quote)
-    if quoted_items is not None and items:
+    if items:
+        if not quoted_items:
+            return QuoteCheck(False, "missing_quote_items", age_seconds=age, items_bound=False)
         if items_fingerprint(quoted_items) != items_fingerprint(items):
             return QuoteCheck(False, "items_mismatch", age_seconds=age, items_bound=True)
         return QuoteCheck(True, "ok", age_seconds=age, items_bound=True)
-    # A quote without an item payload cannot be bound locally. Accept it (older
-    # callers only pass the price fields) but report it as unbound so callers
-    # can decide to re-quote before payment.
+    # No candidate items to bind (for example a delivery-fee total on an empty
+    # payload). Report it as unbound; do not invent an item list.
     return QuoteCheck(True, "ok_unbound_items", age_seconds=age, items_bound=False)
 
 
@@ -333,8 +342,15 @@ def consistency_report(pending: Mapping[str, Any], calc: Mapping[str, Any]) -> D
     order payload, the amounts, and the price wording agree.
     """
     issues: List[str] = []
-    pending_items = list(pending.get("items") or [])
-    calc_items = list(calc.get("items") or pending_items)
+    pending_items = list(pending.get("items") or []) if isinstance(pending.get("items"), list) else []
+    calc_field = calc.get("items") if isinstance(calc, Mapping) else None
+    # Never treat a missing calc item list as the pending list. That made an
+    # empty calculate-price payload look bound to whatever the user was shown.
+    if not isinstance(calc_field, list) or not calc_field:
+        issues.append("calc_items_missing")
+        calc_items: List[Any] = []
+    else:
+        calc_items = list(calc_field)
 
     if _code_list(pending_items) != _code_list(calc_items):
         issues.append("product_codes_mismatch")

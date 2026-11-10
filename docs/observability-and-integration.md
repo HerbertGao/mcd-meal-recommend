@@ -92,9 +92,11 @@ python3 engine/mcp_cache.py stats
 python3 engine/mcp_cache.py prune
 ```
 
-`menuFingerprint` 由调用方对菜单 payload 取 `mcp_cache.fingerprint(menu)`；菜单一变，详情缓存自动判为 `context_changed`。
+`menuFingerprint` 由调用方对菜单 payload 取 `mcp_cache.fingerprint(menu)`，并且是详情缓存键的一部分。缺省指纹会被拒绝，不能当成通配。两份菜单的详情落在不同目录，读取另一份菜单得到 `missing`，不会返回上一份详情；若文件里的指纹与查找键不一致，结果是 `context_changed`。
 
-**缓存价不是已核实价。** 缓存只保存菜单/详情快照，打分输出的仍是 `estimate`，仍需实时 `calculate-price`。预热只是把菜单和详情提前取好，不预热任何"实付"。
+损坏的 `entry.json`、payload 指纹不符、损坏的 tombstone 都不是命中。`prune` 会删除损坏条目和过期超过保留窗口的条目，**不会**删除 tombstone；失败标记要到下一次成功 `put` 才清除。
+
+**缓存价不是已核实价。** 缓存只保存菜单/详情快照，打分输出的仍是 `estimate`，仍需实时 `calculate-price`。预热只是把菜单和详情提前取好，不预热任何"实付"。这些缓存、计时和换餐同步模块没有接到午餐/早餐例程里；例程不调用它们之前，不能说已经生效。
 
 ## 4. 价态（`engine/quote_state.py`、`engine/budget.py`）
 
@@ -104,7 +106,9 @@ python3 engine/mcp_cache.py prune
 | `quoted` | 当前流程 `calculate-price` 且未过期、items 与上下文匹配 | `实付 ¥x` | `false` |
 | `stale` | 曾报价但过期，或 items/门店/预约已变 | `估价 ¥x（核价已过期，需重新核价）` | `true` |
 
-`apply_quote` 会拒绝以下报价：缺少 `price`、超过 TTL、`expiresAt` 已过、`items` 指纹不同、门店/履约/预约等上下文不一致。被拒绝时清空 `payableFen` 并置 `quoteRejected` / `quoteStale`，旧"实付"不会继续显示。
+`apply_quote` 会拒绝以下报价：缺少 `price`、没有 `quotedAt`/`expiresAt`、超过 TTL、`expiresAt` 已过、报价时间明显晚于当前时间、候选带有 items 但报价没有可绑定的 items、`items` 指纹不同、请求里已经填写的门店/履约/预约字段在报价中缺失或不一致。被拒绝时清空 `payableFen` 并置 `quoteRejected` / `quoteStale`，旧"实付"不会继续显示。
+
+报价省略某个上下文字段不算匹配。堂食报价不能确认外送单，午餐报价不能确认次日早餐预约。
 
 TTL 来源：请求或 profile 的 `quoteTtlMinutes`（默认 1800 秒）。
 
@@ -122,9 +126,10 @@ python3 engine/exposure_log.py --file runs/history/exposure-lunch.json record \
 python3 engine/exposure_log.py --file runs/history/exposure-lunch.json summary --store <STORE>
 ```
 
-- 写入幂等：同一 `(kind, 作用域, 日期, rotationKey, seq)` 只写一次，重复调用返回 `duplicate`。
+- 写入幂等：同一 `(kind, 作用域, 日期, rotationKey, seq)` 只写一次，重复调用返回 `duplicate`。调用方自带的 `eventKey` 不会另算一条。
+- 日志文件损坏时拒绝覆盖，打分侧只标记 `exposureLogUnreadable`，不降权，也不把损坏读成"从未曝光"。
 - 跳过 **不**写成交，也不写"用户不爱"。
-- 打分侧通过请求的 `exposurePath` 或内联 `exposureEvents` 读取；没有日志时完全不推断。
+- 打分侧通过请求的 `exposurePath` 或内联 `exposureEvents` 读取；没有日志时完全不推断。例程未传入这份日志时，曝光分轨不会生效。
 - 已曝光未接受只给有上限的轮换降权（默认 `exposure^0.88 × skip^0.9`，下限 0.5），并在响应里输出 `priorExposure` / `exposureCount` / `skipCount` / `exposurePenalty` / `exposurePenaltyReason`。
 - 成交仍只由既有的 history 轨道表达；曝光日志不新增成交。
 
@@ -132,10 +137,10 @@ python3 engine/exposure_log.py --file runs/history/exposure-lunch.json summary -
 
 ## 6. 点名套餐与换餐同步（`engine/combo_edit.py`）
 
-- `plan_named_combo` 对每一轮排序：显式偏好 > 未近期吃过 > 差价小；零加价项**不会**仅因免费而默认胜出。`keep` 只能钉住该轮真实存在的 code，不会凭空生成 SKU。
+- `plan_named_combo` 对每一轮排序：显式偏好 > 未近期吃过 > 差价小；零加价项**不会**仅因免费而默认胜出。`keep` 只能钉住该轮真实存在的 code：code 不存在时回退到排序结果，但 `pinned` 为 false，并写入 `pinMissed` / `unresolvedKeeps`。不会凭空生成 SKU。
 - `describe_swap` 列出 pending 与 calc 的逐轮差异。
-- `sync_snapshots` 以 calc 快照为唯一价格来源重建 pending：items、`roundList`、价态、文案一并同步；两者描述不同订单时直接拒绝（`snapshots_describe_different_orders`），不静默合并。
-- 报价过期时 pending 进入 `estimate_requote_required`，绝不会停留在 `quoted_awaiting_confirm`。
+- `sync_snapshots` 以 calc 快照为唯一价格来源重建 pending：items、`roundList`、价态、文案一并同步。calc 缺少 items 时直接拒绝（`calc_items_missing`），不会把 pending 的商品当成已核价。两者描述不同订单时拒绝（`snapshots_describe_different_orders`）。门店或履约不一致时拒绝（`quote_context_mismatch`）。
+- 报价过期时 pending 进入 `estimate_requote_required`，绝不会停留在 `quoted_awaiting_confirm`。成功同步后，`humanSummary`、`roundList` 和金额都来自同一份 calc。
 
 ## 7. 候选家族诊断（`engine/build_candidates.py`）
 

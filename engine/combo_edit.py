@@ -101,7 +101,8 @@ def order_choices(
         except (TypeError, ValueError):
             diff = 0
         name = _norm(raw.get("name") or raw.get("productName"))
-        is_default = bool(raw.get("isDefault")) or str(raw.get("isDefault")) == "1"
+        flag = raw.get("isDefault")
+        is_default = flag is True or flag == 1 or str(flag) == "1"
 
         score = 0.0
         reasons: List[str] = []
@@ -196,9 +197,10 @@ def plan_named_combo(
 ) -> Dict[str, Any]:
     """Propose one option per round for a named product (read-only).
 
-    ``keep`` pins a round to a code the user explicitly asked for; pinned codes
-    must exist in that round. Returns the proposed ``roundList`` plus per-round
-    ranking so the caller can show alternatives.
+    ``keep`` pins a round only when that code exists in the round. A missing
+    code falls back to the ranked choice but ``pinned`` stays false. Returns
+    the proposed ``roundList`` plus per-round ranking so the caller can show
+    alternatives.
     """
     prefer_by_round = prefer_by_round or {}
     recent_by_round = recent_by_round or {}
@@ -206,12 +208,18 @@ def plan_named_combo(
     rounds = _rounds_of(detail)
     round_list: List[Dict[str, Any]] = []
     decisions: List[Dict[str, Any]] = []
+    unresolved: List[Dict[str, Any]] = []
+    seen_ids = set()
+    seen_names = set()
     base_diff = 0
     for rnd in rounds:
         round_id = _norm(rnd.get("id") or rnd.get("round"))
         if not round_id:
             continue
         round_name = _norm(rnd.get("name"))
+        seen_ids.add(round_id)
+        if round_name:
+            seen_names.add(round_name)
         choices = _round_choices(rnd)
         if not choices:
             continue
@@ -221,10 +229,14 @@ def plan_named_combo(
             recent_codes=recent_by_round.get(round_id) or recent_by_round.get(round_name) or (),
             round_name=round_name,
         )
-        pinned = keep.get(round_id) or keep.get(round_name)
-        chosen = next((item for item in ranked if item.code == pinned), None) if pinned else None
-        if chosen is None:
-            chosen = ranked[0]
+        if not ranked:
+            continue
+        requested = keep.get(round_id) or keep.get(round_name)
+        matched = next((item for item in ranked if item.code == requested), None) if requested else None
+        pinned = matched is not None
+        if requested and not pinned:
+            unresolved.append({"round": round_id, "requested": requested, "reason": "unknown_code"})
+        chosen = matched if pinned else ranked[0]
         base_diff += chosen.diff_fen
         round_list.append(
             {"round": round_id, "comboItemList": [{"code": chosen.code, "quantity": 1}]}
@@ -233,16 +245,21 @@ def plan_named_combo(
             {
                 "round": round_id,
                 "roundName": round_name,
-                "pinned": bool(pinned),
-                "requested": pinned or None,
+                "pinned": pinned,
+                "requested": requested or None,
+                "pinMissed": bool(requested) and not pinned,
                 "chosen": chosen.as_dict(),
                 "order": [item.as_dict() for item in ranked],
             }
         )
+    for key, code in keep.items():
+        if key not in seen_ids and key not in seen_names:
+            unresolved.append({"round": key, "requested": code, "reason": "unknown_round"})
     return {
         "roundList": round_list,
         "decisions": decisions,
         "diffFen": base_diff,
+        "unresolvedKeeps": unresolved,
         "note": "zero-difference options do not win by default; recent/coded preferences and price break ties",
     }
 
@@ -306,8 +323,16 @@ def sync_snapshots(
     ``实付`` for an estimate or show items the quote did not price.
     """
     now = now or datetime.now(CST)
+    calc_items = calc.get("items") if isinstance(calc.get("items"), list) else None
+    if not calc_items:
+        # An empty calculate-price payload cannot prove which roundList was priced.
+        return {
+            "ok": False,
+            "error": "calc_items_missing",
+            "issues": ["calc_items_missing"],
+            "changes": describe_swap(pending, calc),
+        }
     report = quote_state.consistency_report(pending, calc)
-    items = list(calc.get("items") or pending.get("items") or [])
     if require_identical_items and not report["consistent"]:
         item_issues = [
             issue
@@ -318,6 +343,7 @@ def sync_snapshots(
                 "round_list_mismatch",
                 "combo_codes_mismatch",
                 "pending_claims_verified_without_calc",
+                "calc_items_missing",
             }
         ]
         if item_issues:
@@ -328,24 +354,50 @@ def sync_snapshots(
                 "changes": describe_swap(pending, calc),
             }
 
+    items = list(calc_items)
     quote = {
         "price": calc.get("payableFen", calc.get("priceFen")),
         "productPrice": calc.get("priceFen"),
         "quotedAt": calc.get("quotedAt") or calc.get("fetchedAt"),
+        "expiresAt": calc.get("expiresAt"),
         "items": items,
+        **quote_state.context_of(calc),
     }
+    ttl_seconds = quote_state._quote_ttl(calc)
+    if ttl_seconds is None:
+        ttl_seconds = quote_state._quote_ttl(pending)
     check = quote_state.check_quote(
         quote,
         items=items,
-        context=quote_state.context_of(calc),
+        context=quote_state.context_of(pending),
         now=now,
-        ttl_seconds=quote_state._quote_ttl(calc),
+        ttl_seconds=ttl_seconds,
         require_timestamp=True,
     )
+    if str(check.reason).startswith("context_mismatch"):
+        return {
+            "ok": False,
+            "error": "quote_context_mismatch",
+            "issues": list(report["issues"]) + [check.reason],
+            "changes": describe_swap(pending, calc),
+        }
+    price_raw = calc.get("priceFen")
+    if isinstance(price_raw, bool) or not isinstance(price_raw, int):
+        if check.ok and isinstance(quote["price"], int) and not isinstance(quote["price"], bool):
+            price_raw = quote["price"]
+        else:
+            price_raw = 0
+    payable_raw = quote["price"]
+    payable_fen = (
+        int(payable_raw)
+        if check.ok and isinstance(payable_raw, int) and not isinstance(payable_raw, bool)
+        else None
+    )
+    state = quote_state.QUOTED if check.ok else (quote_state.STALE if check.expired else quote_state.ESTIMATE)
     status = quote_state.PriceStatus(
-        state=quote_state.QUOTED if check.ok else (quote_state.STALE if check.expired else quote_state.ESTIMATE),
-        price_fen=int(calc.get("priceFen") or pending.get("priceFen") or 0),
-        payable_fen=int(quote["price"]) if check.ok and isinstance(quote["price"], int) else None,
+        state=state,
+        price_fen=int(price_raw),
+        payable_fen=payable_fen,
         verified=check.ok,
         needs_quote=not check.ok,
         label=quote_state.PRICE_LABELS[
@@ -357,7 +409,11 @@ def sync_snapshots(
 
     merged = dict(pending)
     merged["items"] = items
-    merged["combos"] = list(calc.get("combos") or pending.get("combos") or items)
+    # Price, items, and fulfillment come from the calc snapshot only.
+    merged["combos"] = list(calc.get("combos") or items)
+    for key, value in quote_state.context_of(calc).items():
+        if value:
+            merged[key] = value
     merged["priceFen"] = status.price_fen
     merged["payableFen"] = status.payable_fen
     merged["priceVerified"] = status.verified

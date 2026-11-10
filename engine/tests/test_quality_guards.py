@@ -1,9 +1,11 @@
 """Price state, cache isolation, exposure tracks, named-combo ordering, snapshot sync."""
 
 import json
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -77,7 +79,13 @@ class PriceStateTest(unittest.TestCase):
     def test_fresh_quote_confirms_and_renders_paid(self):
         c = cand()
         now = datetime(2026, 11, 10, 12, 19, 16, tzinfo=CST)
-        quote = {"price": 2390, "productPrice": 2390, "quotedAt": now.isoformat(), "items": items()}
+        quote = {
+            "price": 2390,
+            "productPrice": 2390,
+            "quotedAt": now.isoformat(),
+            "items": items(),
+            "dining": "eat-in",
+        }
         apply_quote(c, quote, req={"dining": "eat-in"}, now=now)
         req = {"budgetFen": 3500, "dining": "eat-in"}
         self.assertIsNone(score_lunch.hard_filter(c, req))
@@ -92,7 +100,13 @@ class PriceStateTest(unittest.TestCase):
     def test_expired_quote_drops_back_to_estimate(self):
         c = cand()
         quoted = datetime(2026, 11, 10, 9, 0, 0, tzinfo=CST)
-        quote = {"price": 2390, "productPrice": 2390, "quotedAt": quoted.isoformat(), "items": items()}
+        quote = {
+            "price": 2390,
+            "productPrice": 2390,
+            "quotedAt": quoted.isoformat(),
+            "items": items(),
+            "dining": "eat-in",
+        }
         now = quoted + timedelta(minutes=31)
         apply_quote(c, quote, req={"dining": "eat-in", "quoteTtlMinutes": 30}, now=now)
         self.assertFalse(c.price_verified)
@@ -112,7 +126,13 @@ class PriceStateTest(unittest.TestCase):
         c = cand()
         now = datetime(2026, 11, 10, 12, 19, 16, tzinfo=CST)
         other = items(side="4800")
-        quote = {"price": 2390, "productPrice": 2390, "quotedAt": now.isoformat(), "items": other}
+        quote = {
+            "price": 2390,
+            "productPrice": 2390,
+            "quotedAt": now.isoformat(),
+            "items": other,
+            "dining": "eat-in",
+        }
         apply_quote(c, quote, req={"dining": "eat-in"}, now=now)
         self.assertFalse(c.price_verified)
         self.assertEqual(c.meta["quoteRejected"], "items_mismatch")
@@ -141,8 +161,100 @@ class PriceStateTest(unittest.TestCase):
         # An unverified stale payable must not drive the budget decision.
         self.assertEqual(budget_check(c, req), "unverified_delivery_total")
         now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
-        apply_quote(c, {"price": 2290, "productPrice": 1690, "quotedAt": now.isoformat(), "items": c.items}, req=req, now=now)
+        apply_quote(
+            c,
+            {
+                "price": 2290,
+                "productPrice": 1690,
+                "quotedAt": now.isoformat(),
+                "items": c.items,
+                "dining": "delivery",
+            },
+            req=req,
+            now=now,
+        )
         self.assertEqual(budget_check(c, req), "over_budget_payable:2290>2000")
+
+    def test_undated_quote_is_not_verified(self):
+        c = cand()
+        apply_quote(c, {"price": 2390, "productPrice": 2390, "items": items(), "dining": "eat-in"}, req={"dining": "eat-in"})
+        self.assertFalse(c.price_verified)
+        self.assertIsNone(c.payable_fen)
+        self.assertEqual(c.meta["quoteRejected"], "missing_quote_time")
+
+    def test_quote_without_items_does_not_bind_a_candidate(self):
+        c = cand()
+        now = datetime(2026, 11, 10, 12, 19, 16, tzinfo=CST)
+        apply_quote(
+            c,
+            {"price": 2390, "productPrice": 2390, "quotedAt": now.isoformat(), "dining": "eat-in"},
+            req={"dining": "eat-in"},
+            now=now,
+        )
+        self.assertFalse(c.price_verified)
+        self.assertIsNone(c.payable_fen)
+        self.assertEqual(c.meta["quoteRejected"], "missing_quote_items")
+        c.score = 1
+        resp = score_lunch.build_response(c, [], [c], {"budgetFen": 3500, "dining": "eat-in"}, [], False, "rank_only")
+        self.assertNotIn("实付", resp["humanSummary"])
+        self.assertTrue(resp["needsQuoteBeforeConfirm"])
+        # Passing items=[] must not bypass the candidate payload.
+        c2 = cand()
+        apply_quote(
+            c2,
+            {"price": 2390, "productPrice": 2390, "quotedAt": now.isoformat(), "dining": "eat-in"},
+            req={"dining": "eat-in"},
+            items=[],
+            now=now,
+        )
+        self.assertFalse(c2.price_verified)
+        self.assertEqual(c2.meta["quoteRejected"], "missing_quote_items")
+
+    def test_quote_must_echo_fulfillment(self):
+        c = cand()
+        now = datetime(2026, 11, 10, 12, 19, 16, tzinfo=CST)
+        eat_in = {
+            "price": 2390,
+            "productPrice": 2390,
+            "quotedAt": now.isoformat(),
+            "items": items(),
+            "dining": "eat-in",
+            "storeCode": "400001",
+        }
+        apply_quote(c, eat_in, req={"dining": "delivery", "storeCode": "400001"}, now=now)
+        self.assertFalse(c.price_verified)
+        self.assertEqual(c.meta["quoteRejected"], "context_mismatch:dining")
+
+        c2 = cand()
+        breakfast = dict(eat_in, dining="delivery", reservationDate="2026-11-10 12:00", addressId="addr-a", beCode="BE1")
+        apply_quote(
+            c2,
+            breakfast,
+            req={
+                "dining": "delivery",
+                "storeCode": "400001",
+                "reservationDate": "2026-11-11 07:00",
+                "addressId": "addr-a",
+                "beCode": "BE1",
+            },
+            now=now,
+        )
+        self.assertFalse(c2.price_verified)
+        self.assertEqual(c2.meta["quoteRejected"], "context_mismatch:reservationDate")
+
+    def test_future_quote_time_is_not_fresh(self):
+        c = cand()
+        now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
+        quote = {
+            "price": 2390,
+            "productPrice": 2390,
+            "quotedAt": (now + timedelta(hours=3)).isoformat(),
+            "items": items(),
+            "dining": "eat-in",
+        }
+        apply_quote(c, quote, req={"dining": "eat-in"}, now=now)
+        self.assertFalse(c.price_verified)
+        self.assertEqual(c.meta["quoteRejected"], "quote_time_in_future")
 
 
 class CacheIsolationTest(unittest.TestCase):
@@ -184,10 +296,24 @@ class CacheIsolationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = mcp_cache.SnapshotCache(tmp)
             now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
-            cache.put(self.key(), {"ok": True}, now=now)
-            stale = cache.get(self.key(menu_fingerprint="m2"), now=now)
-            self.assertEqual(stale.status, "context_changed")
-            self.assertEqual(stale.reason, "menu_fingerprint")
+            cache.put(self.key(), {"ok": True, "menu": "m1"}, now=now)
+            other = self.key(menu_fingerprint="m2")
+            self.assertNotEqual(self.key().digest(), other.digest())
+            stale = cache.get(other, now=now)
+            self.assertEqual(stale.status, "missing")
+            self.assertIsNone(stale.payload)
+            cache.put(other, {"ok": True, "menu": "m2"}, now=now)
+            self.assertEqual(cache.get(self.key(), now=now).payload, {"ok": True, "menu": "m1"})
+            self.assertEqual(cache.get(other, now=now).payload, {"ok": True, "menu": "m2"})
+            # A file whose stored fingerprint was edited must not stay a hit.
+            stored = cache.entry_path(self.key())
+            edited = json.loads(stored.read_text(encoding="utf-8"))
+            edited["meta"]["menuFingerprint"] = "m2"
+            stored.write_text(json.dumps(edited), encoding="utf-8")
+            disagreed = cache.get(self.key(), now=now)
+            self.assertEqual(disagreed.status, "context_changed")
+            self.assertIn("menuFingerprint", disagreed.reason)
+            self.assertIsNone(disagreed.payload)
 
     def test_expired_entry_is_not_returned(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,6 +357,95 @@ class CacheIsolationTest(unittest.TestCase):
         score_lunch.hard_filter(c, req)
         self.assertFalse(c.price_verified)
         self.assertTrue(c.meta["needsQuoteBeforeConfirm"])
+
+    def test_omitted_menu_fingerprint_is_rejected(self):
+        with self.assertRaises(ValueError):
+            mcp_cache.CacheKey(
+                kind=mcp_cache.KIND_DETAIL,
+                store_code="400001",
+                product_code="9900016671",
+                menu_fingerprint="",
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code = mcp_cache.main(
+                    ["--root", tmp, "get", "--kind", "detail", "--store", "400001", "--product-code", "9900016671"]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("menuFingerprint", err.getvalue())
+            self.assertEqual(list(Path(tmp).rglob("entry.json")), [])
+
+    def test_cross_kind_and_fulfillment_do_not_share_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = mcp_cache.SnapshotCache(tmp)
+            now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
+            menu_key = mcp_cache.CacheKey(
+                kind=mcp_cache.KIND_MENU,
+                store_code="400001",
+                dining="eat-in",
+                meal_period="lunch",
+            )
+            detail_key = self.key()
+            delivery_key = self.key(dining="delivery", be_code="BE1", address_id="addr-1")
+            other_store = self.key(store_code="1950895")
+            cache.put(menu_key, {"kind": "menu"}, now=now)
+            cache.put(detail_key, {"kind": "detail"}, now=now)
+            self.assertEqual(cache.get(menu_key, now=now).payload, {"kind": "menu"})
+            self.assertEqual(cache.get(detail_key, now=now).payload, {"kind": "detail"})
+            self.assertEqual(cache.get(delivery_key, now=now).status, "missing")
+            self.assertEqual(cache.get(other_store, now=now).status, "missing")
+            self.assertNotEqual(menu_key.dirname(Path(tmp)), detail_key.dirname(Path(tmp)))
+
+    def test_corrupt_entry_and_tombstone_are_not_hits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = mcp_cache.SnapshotCache(tmp)
+            now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
+            key = self.key()
+            cache.put(key, {"ok": True}, now=now)
+            path = cache.entry_path(key)
+            path.write_text("{", encoding="utf-8")
+            broken = cache.get(key, now=now)
+            self.assertEqual(broken.status, "error")
+            self.assertEqual(broken.reason, "corrupt_entry")
+            self.assertIsNone(broken.payload)
+
+            cache.put(key, {"ok": True}, now=now)
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            doc["payload"] = {"ok": False}
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            tampered = cache.get(key, now=now)
+            self.assertEqual(tampered.status, "error")
+            self.assertEqual(tampered.reason, "payload_fingerprint_mismatch")
+
+            cache.put(key, {"ok": True}, now=now)
+            cache.tombstone_path(key).write_text("{", encoding="utf-8")
+            blocked = cache.get(key, now=now)
+            self.assertEqual(blocked.status, "invalidated")
+            self.assertEqual(blocked.reason, "corrupt_tombstone")
+
+    def test_prune_drops_corrupt_and_old_entries_but_keeps_tombstones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = mcp_cache.SnapshotCache(tmp)
+            start = datetime(2026, 11, 10, 12, 0, 0, tzinfo=CST)
+            fresh = self.key()
+            old = self.key(product_code="9900016651")
+            corrupt = self.key(product_code="9900016655")
+            failed = self.key(product_code="9900016668")
+            cache.put(fresh, {"ok": True}, now=start, ttl_seconds=10 * 86400)
+            cache.put(old, {"ok": True}, now=start, ttl_seconds=60)
+            cache.put(corrupt, {"ok": True}, now=start)
+            cache.entry_path(corrupt).write_text("[]", encoding="utf-8")
+            cache.fail(failed, "timeout", now=start)
+            later = start + timedelta(days=2)
+            removed = cache.prune(now=later, keep_expired_seconds=86400)
+            self.assertGreaterEqual(removed, 2)
+            self.assertFalse(cache.entry_path(old).exists())
+            self.assertFalse(cache.entry_path(corrupt).exists())
+            self.assertTrue(cache.get(fresh, now=start + timedelta(minutes=30)).ok)
+            self.assertTrue(cache.tombstone_path(failed).exists())
+            self.assertEqual(cache.get(failed, now=later).status, "invalidated")
+            self.assertEqual(cache.get(failed, now=later).reason, "previous_error")
 
 
 class ExposureTrackTest(unittest.TestCase):
@@ -318,6 +533,37 @@ class ExposureTrackTest(unittest.TestCase):
         score_lunch.apply_exposure_rotation([c], {"dining": "eat-in"})
         self.assertFalse(c.meta.get("priorExposure"))
         self.assertEqual(c.score, 50.19)
+
+    def test_corrupt_log_is_not_overwritten_or_treated_as_unseen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "events.json")
+            Path(path).write_text("{", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                exposure_log.record(path, self.event("exposure"))
+            self.assertEqual(Path(path).read_text(encoding="utf-8"), "{")
+            c = cand(score=50.19)
+            score_lunch.apply_exposure_rotation(
+                [c],
+                {"storeCode": "400001", "dining": "eat-in", "mealPeriod": "lunch", "exposurePath": path},
+            )
+            self.assertEqual(c.score, 50.19)
+            self.assertTrue(c.meta.get("exposureLogUnreadable"))
+            self.assertFalse(c.meta.get("priorExposure"))
+
+    def test_forged_event_key_does_not_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "events.json")
+            exposure_log.record(path, self.event("exposure"))
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+            doc["events"][0]["eventKey"] = "forged-key"
+            Path(path).write_text(json.dumps(doc), encoding="utf-8")
+            again = exposure_log.record(path, self.event("exposure"))
+            self.assertEqual(again.status, "duplicate")
+            self.assertEqual(len(exposure_log.load_log(path)["events"]), 1)
+            skip = exposure_log.record(path, self.event("skip"))
+            self.assertEqual(skip.status, "recorded")
+            kinds = [row["kind"] for row in exposure_log.load_log(path)["events"]]
+            self.assertEqual(kinds, ["exposure", "skip"])
 
     def test_other_store_scope_is_ignored(self):
         c = cand(score=50.19)
@@ -410,6 +656,13 @@ class NamedComboOrderingTest(unittest.TestCase):
         plan2 = combo_edit.plan_named_combo(self.detail(), keep={"3": "not-on-menu"})
         round3b = next(row for row in plan2["decisions"] if row["round"] == "3")
         self.assertNotEqual(round3b["chosen"]["code"], "not-on-menu")
+        self.assertFalse(round3b["pinned"])
+        self.assertTrue(round3b["pinMissed"])
+        self.assertEqual(round3b["requested"], "not-on-menu")
+        self.assertTrue(any(row["reason"] == "unknown_code" for row in plan2["unresolvedKeeps"]))
+        missing_round = combo_edit.plan_named_combo(self.detail(), keep={"99": "3050"})
+        self.assertTrue(all(not row["pinned"] for row in missing_round["decisions"]))
+        self.assertTrue(any(row["reason"] == "unknown_round" for row in missing_round["unresolvedKeeps"]))
 
     def test_swapping_a_side_changes_only_that_round(self):
         before = {"items": items()}
@@ -506,6 +759,69 @@ class SnapshotSyncTest(unittest.TestCase):
         report = quote_state.consistency_report(self.pending(), calc)
         self.assertIn("human_summary_price_wording_mismatch", report["issues"])
         self.assertFalse(report["consistent"])
+
+    def test_calc_without_items_does_not_inherit_pending(self):
+        calc = self.calc()
+        calc.pop("items")
+        report = quote_state.consistency_report(self.pending(), calc)
+        self.assertIn("calc_items_missing", report["issues"])
+        self.assertFalse(report["consistent"])
+        result = combo_edit.sync_snapshots(
+            self.pending(), calc, now=datetime(2026, 11, 10, 12, 40, 0, tzinfo=CST)
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "calc_items_missing")
+        self.assertNotIn("pending", result)
+        blob = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("实付", blob)
+
+        empty = self.calc()
+        empty["items"] = []
+        empty_result = combo_edit.sync_snapshots(
+            self.pending(), empty, now=datetime(2026, 11, 10, 12, 40, 0, tzinfo=CST)
+        )
+        self.assertFalse(empty_result["ok"])
+        self.assertEqual(empty_result["error"], "calc_items_missing")
+
+    def test_swap_sync_keeps_summary_round_list_and_price_together(self):
+        swapped_items = items(side="4800")
+        pending = self.pending()
+        pending["items"] = swapped_items
+        pending["humanSummary"] = "套餐（双层脆鸡堡+玉米杯+雪碧中杯去冰），实付¥23.9"
+        calc = self.calc()
+        calc["items"] = swapped_items
+        calc["humanSummary"] = "套餐（双层脆鸡堡+玉米杯+雪碧中杯去冰）"
+        calc["payableFen"] = 2590
+        calc["priceFen"] = 2590
+        now = datetime(2026, 11, 10, 12, 40, 0, tzinfo=CST)
+        result = combo_edit.sync_snapshots(pending, calc, now=now)
+        self.assertTrue(result["ok"])
+        merged = result["pending"]
+        self.assertEqual(merged["items"], swapped_items)
+        self.assertEqual(quote_state.items_fingerprint(merged["items"]), quote_state.items_fingerprint(calc["items"]))
+        self.assertEqual(merged["payableFen"], 2590)
+        self.assertEqual(merged["priceFen"], 2590)
+        self.assertEqual(merged["priceState"], quote_state.QUOTED)
+        self.assertIn("实付 ¥25.9", merged["humanSummary"])
+        self.assertIn("玉米杯", merged["humanSummary"])
+        self.assertNotIn("≈", merged["humanSummary"])
+        self.assertNotIn("4810", json.dumps(merged["items"]))
+
+        mismatched = combo_edit.sync_snapshots(self.pending(), calc, now=now)
+        self.assertFalse(mismatched["ok"])
+        self.assertEqual(mismatched["error"], "snapshots_describe_different_orders")
+        self.assertNotIn("pending", mismatched)
+
+    def test_sync_refuses_a_quote_for_a_different_fulfillment(self):
+        calc = self.calc()
+        calc["dining"] = "delivery"
+        calc["addressId"] = "addr-1"
+        result = combo_edit.sync_snapshots(
+            self.pending(), calc, now=datetime(2026, 11, 10, 12, 40, 0, tzinfo=CST)
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "quote_context_mismatch")
+        self.assertTrue(any(issue.startswith("context_mismatch:dining") for issue in result["issues"]))
 
 
 class CandidateFamilyExplanationTest(unittest.TestCase):

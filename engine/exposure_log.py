@@ -100,7 +100,8 @@ def normalize_event(raw: Any) -> Optional[Dict[str, Any]]:
         event["note"] = str(raw["note"])
     if raw.get("source"):
         event["source"] = str(raw["source"])
-    event["eventKey"] = str(raw.get("eventKey") or event_key(event))
+    # Identity is recomputed. A caller-supplied eventKey must not bypass dedup.
+    event["eventKey"] = event_key(event)
     return event
 
 
@@ -134,16 +135,27 @@ def normalize_log(data: Any) -> Dict[str, Any]:
     return doc
 
 
-def load_log(path: Optional[str]) -> Dict[str, Any]:
+def read_log(path: Optional[str]) -> Tuple[Dict[str, Any], str]:
+    """Load a log. Status is ``missing``, ``ok``, or ``corrupt``.
+
+    A corrupt file is not treated as an empty history: callers must not
+    overwrite it or read it as "never shown".
+    """
     if not path:
-        return empty_log()
+        return empty_log(), "missing"
     p = Path(path)
     if not p.is_file():
-        return empty_log()
+        return empty_log(), "missing"
     try:
-        return normalize_log(json.loads(p.read_text(encoding="utf-8")))
+        raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return empty_log()
+        return {"version": 1, "events": [], "unreadable": True}, "corrupt"
+    return normalize_log(raw), "ok"
+
+
+def load_log(path: Optional[str]) -> Dict[str, Any]:
+    doc, _status = read_log(path)
+    return doc
 
 
 def save_log(path: str, doc: Mapping[str, Any]) -> Path:
@@ -168,7 +180,9 @@ def record(path: str, raw: Mapping[str, Any], *, now: Optional[datetime] = None)
     event = normalize_event(payload)
     if event is None:
         raise ValueError(f"invalid event: kind must be one of {KINDS} and rotationKey is required")
-    doc = load_log(path)
+    doc, status = read_log(path)
+    if status == "corrupt":
+        raise ValueError("exposure log is unreadable; refusing to overwrite")
     existing = {str(item.get("eventKey") or "") for item in doc["events"]}
     if event["eventKey"] in existing:
         return RecordResult("duplicate", event)

@@ -231,7 +231,10 @@ class OfflineContractTest(unittest.TestCase):
         request = {"budgetFen": 2000, "dining": "delivery"}
         # Unquoted delivery totals must not be reported as confirmed or in budget.
         self.assertEqual(budget_check(cand, request), "unverified_delivery_total")
-        apply_quote(cand, {"productPrice": 1690, "price": 2290})
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone(timedelta(hours=8)))
+        apply_quote(cand, {"productPrice": 1690, "price": 2290, "quotedAt": now.isoformat()}, now=now)
         self.assertEqual(cand.payable_fen, 2290)
         self.assertTrue(cand.price_verified)
         self.assertEqual(budget_check(cand, request), "over_budget_payable:2290>2000")

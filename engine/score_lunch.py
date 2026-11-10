@@ -963,7 +963,14 @@ def apply_exposure_rotation(cands: List[ScoredCandidate], req: Dict[str, Any]) -
     if isinstance(events, list) and events:
         doc_events = events
     elif log_path:
-        doc_events = exposure_log.load_log(str(log_path)).get("events") or []
+        loaded = exposure_log.load_log(str(log_path))
+        if loaded.get("unreadable"):
+            # Do not treat a broken log as "never exposed", and do not invent a penalty.
+            for cand in cands:
+                if isinstance(getattr(cand, "meta", None), dict):
+                    cand.meta["exposureLogUnreadable"] = True
+            return
+        doc_events = loaded.get("events") or []
     else:
         return
     if not doc_events:

@@ -60,22 +60,28 @@ def apply_quote(
 ) -> Any:
     """Record a calculate-price quote on a candidate.
 
-    The quote is only promoted to a verified amount when it is well formed, not
-    expired, and bound to the candidate's items (when both sides carry them).
-    Otherwise the candidate is marked ``quoteStale``/``quoteRejected`` and keeps
-    its estimate price, so display and budget logic cannot use the old amount.
+    The quote is promoted only when it has a timestamp, is inside the freshness
+    window, echoes every fulfillment field the request set, and — when the
+    candidate has items — carries that same item payload. Otherwise the
+    candidate is marked ``quoteStale``/``quoteRejected`` and keeps its estimate,
+    so display and budget logic cannot use the old amount.
     """
     meta = getattr(cand, "meta", None)
     if not isinstance(meta, dict):
         meta = {}
         cand.meta = meta
 
+    candidate_items = getattr(cand, "items", None)
+    # An explicit empty list must not drop the candidate's items. Only a
+    # candidate that itself has no items can take an unbound amount.
+    bound_items = items if items else candidate_items
     check = quote_state.check_quote(
         quote,
-        items=items if items is not None else getattr(cand, "items", None),
+        items=bound_items,
         context=quote_state.context_of(req) if req else None,
         now=now,
         ttl_seconds=quote_state._quote_ttl(req),
+        require_timestamp=True,
     )
     meta["quoteCheck"] = check.reason
     meta["quoteAgeSeconds"] = check.age_seconds
