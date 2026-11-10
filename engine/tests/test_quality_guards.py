@@ -5,7 +5,7 @@ import io
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -549,6 +549,65 @@ class ExposureTrackTest(unittest.TestCase):
             self.assertEqual(c.score, 50.19)
             self.assertTrue(c.meta.get("exposureLogUnreadable"))
             self.assertFalse(c.meta.get("priorExposure"))
+            c.score = 50.19
+            resp = score_lunch.build_response(
+                c, [], [c], {"budgetFen": 3500, "dining": "eat-in", "storeCode": "400001"}, [], False, "rank_only"
+            )
+            self.assertTrue(resp["exposureLogUnreadable"])
+            self.assertFalse(resp["priorExposure"])
+            err = io.StringIO()
+            out = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(out):
+                code = exposure_log.main(["--file", path, "summary"])
+            self.assertEqual(code, 2)
+            self.assertEqual(Path(path).read_text(encoding="utf-8"), "{")
+            self.assertIn("unreadable", err.getvalue())
+            self.assertNotIn("rotationKeys", out.getvalue())
+            self.assertNotIn("rotationKeys", err.getvalue())
+            good = str(Path(tmp) / "good.json")
+            exposure_log.record(good, self.event("exposure"))
+            good_out = io.StringIO()
+            with redirect_stdout(good_out):
+                good_code = exposure_log.main(["--file", good, "summary", "--store", "400001"])
+            self.assertEqual(good_code, 0)
+            payload = json.loads(good_out.getvalue())
+            self.assertFalse(payload["unreadable"])
+            self.assertEqual(payload["rotationKeys"]["db6671_515295_4810_3060"]["exposure"], 1)
+            scoped = str(Path(tmp) / "scoped.json")
+            recorded = io.StringIO()
+            with redirect_stdout(recorded):
+                rec_code = exposure_log.main(
+                    [
+                        "--file",
+                        scoped,
+                        "record",
+                        "--kind",
+                        "exposure",
+                        "--rotation-key",
+                        "rk-breakfast",
+                        "--store",
+                        "400001",
+                        "--dining",
+                        "delivery",
+                        "--meal-period",
+                        "breakfast",
+                        "--reservation-date",
+                        "2026-11-11 07:00",
+                        "--at",
+                        "2026-11-11T07:00:00+08:00",
+                    ]
+                )
+            self.assertEqual(rec_code, 0)
+            saved = exposure_log.load_log(scoped)["events"][0]
+            self.assertEqual(saved["mealPeriod"], "breakfast")
+            self.assertEqual(saved["reservationDate"], "2026-11-11 07:00")
+            other = io.StringIO()
+            with redirect_stdout(other):
+                other_code = exposure_log.main(
+                    ["--file", scoped, "summary", "--meal-period", "lunch"]
+                )
+            self.assertEqual(other_code, 0)
+            self.assertEqual(json.loads(other.getvalue())["rotationKeys"], {})
 
     def test_forged_event_key_does_not_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:

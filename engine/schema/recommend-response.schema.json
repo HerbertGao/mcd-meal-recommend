@@ -314,6 +314,10 @@
     "unseenDrink": {
       "type": "boolean"
     },
+    "exposureLogUnreadable": {
+      "type": "boolean",
+      "description": "true 表示请求了 exposurePath 但日志无法解析。此时 priorExposure=false 不能理解成从未曝光"
+    },
     "priorExposure": {
       "type": "boolean",
       "description": "true 表示曝光/跳过日志里出现过同一 rotationKey（仅来自显式 exposure 日志，不来自成交历史）"

@@ -1947,6 +1947,7 @@ def build_response(
         "unseenMain": bool(pick.meta.get("unseenMain")),
         "unseenSide": bool(pick.meta.get("unseenSide")),
         "unseenDrink": bool(pick.meta.get("unseenDrink")),
+        "exposureLogUnreadable": bool(pick.meta.get("exposureLogUnreadable")),
         "priorExposure": bool(pick.meta.get("priorExposure")),
         "exposureCount": int(pick.meta.get("exposureCount") or 0),
         "skipCount": int(pick.meta.get("skipCount") or 0),

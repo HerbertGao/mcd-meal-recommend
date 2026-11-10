@@ -302,8 +302,8 @@ def main(argv: Optional[list] = None) -> int:
     def add_scope(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--store", dest="storeCode", default="")
         parser.add_argument("--dining", default="")
-        parser.add_argument("--meal-period", default="")
-        parser.add_argument("--reservation-date", default="")
+        parser.add_argument("--meal-period", dest="mealPeriod", default="")
+        parser.add_argument("--reservation-date", dest="reservationDate", default="")
 
     rec = sub.add_parser("record", help="append one event (duplicates are ignored)")
     add_scope(rec)
@@ -348,9 +348,36 @@ def main(argv: Optional[list] = None) -> int:
         return 0 if result.status in ("recorded", "duplicate") else 1
 
     scope = {field_name: getattr(args, field_name) for field_name in SCOPE_FIELDS}
-    doc = load_log(args.file)
+    doc, status = read_log(args.file)
+    if status == "corrupt":
+        # A damaged file is not an empty history. Exit non-zero and do not print
+        # zero counts, which would read as "never shown".
+        print(
+            json.dumps(
+                {
+                    "file": args.file,
+                    "unreadable": True,
+                    "error": "exposure log is unreadable; counts were not computed",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     summary = summarize(doc["events"], scope={k: v for k, v in scope.items() if v}, window_days=args.window_days)
-    print(json.dumps({"file": args.file, "windowDays": args.window_days, "rotationKeys": summary}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "file": args.file,
+                "unreadable": False,
+                "windowDays": args.window_days,
+                "rotationKeys": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

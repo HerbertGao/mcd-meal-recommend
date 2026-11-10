@@ -127,7 +127,7 @@ python3 engine/exposure_log.py --file runs/history/exposure-lunch.json summary -
 ```
 
 - 写入幂等：同一 `(kind, 作用域, 日期, rotationKey, seq)` 只写一次，重复调用返回 `duplicate`。调用方自带的 `eventKey` 不会另算一条。
-- 日志文件损坏时拒绝覆盖，打分侧只标记 `exposureLogUnreadable`，不降权，也不把损坏读成"从未曝光"。
+- 日志文件损坏时拒绝覆盖。`summary` 以退出码 2 报告 `unreadable`，不打印全 0 计数。打分响应带 `exposureLogUnreadable=true`，此时 `priorExposure=false` 不能读成从未曝光；不降权，也不写成厌恶。
 - 跳过 **不**写成交，也不写"用户不爱"。
 - 打分侧通过请求的 `exposurePath` 或内联 `exposureEvents` 读取；没有日志时完全不推断。例程未传入这份日志时，曝光分轨不会生效。
 - 已曝光未接受只给有上限的轮换降权（默认 `exposure^0.88 × skip^0.9`，下限 0.5），并在响应里输出 `priorExposure` / `exposureCount` / `skipCount` / `exposurePenalty` / `exposurePenaltyReason`。
