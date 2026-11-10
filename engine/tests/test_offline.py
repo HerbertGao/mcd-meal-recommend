@@ -21,6 +21,17 @@ def load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def recent_iso(days_ago: int = 1) -> str:
+    """Timestamp inside the default history window, relative to today.
+
+    Fixed calendar dates rot out of the 5-day window, which silently turned
+    down-weight assertions into no-ops.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    moment = datetime.now(timezone(timedelta(hours=8))) - timedelta(days=days_ago)
+    return moment.replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+
 def validate(instance, schema_name):
     jsonschema.Draft202012Validator(load(ENGINE / "schema" / schema_name)).validate(instance)
 
@@ -718,7 +729,7 @@ class OfflineContractTest(unittest.TestCase):
             score_lunch.score_candidate(cand, req)
             return cand
 
-        at = "2026-11-04T12:00:00+08:00"
+        at = recent_iso()
         base = score_with(history_tracks={"mains": [], "sides": [], "drinks": []})
         second_side = score_with(
             history_tracks={
@@ -854,8 +865,8 @@ class OfflineContractTest(unittest.TestCase):
         from profile_lib import normalize_history_doc, profile_to_request
 
         raw = {
-            "date": "2026-11-04",
-            "at": "2026-11-04T12:00:00+08:00",
+            "date": recent_iso()[:10],
+            "at": recent_iso(),
             "rotationKey": "mk0884_1100_4810_515106_3050",
             "mainCode": "1100",
             "sideCode": "4810",
