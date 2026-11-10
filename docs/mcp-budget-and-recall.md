@@ -79,8 +79,8 @@
 
 引擎行为：
 
-1. `productPrice` 覆盖候选商品价，`price` 写入 `payableFen`。
-2. 预算按 `payableFen` 判定，可产生 `over_budget_payable`。
+1. `productPrice` 覆盖候选商品价，`price` 写入 `payableFen`，但仅当报价有时间、未过期、候选 items 能与报价 items 对上，且请求中已填写的门店/履约/预约与报价一致。
+2. 预算按已核实的 `payableFen` 判定，可产生 `over_budget_payable`。缺时间、缺 items 或上下文不一致时不写实付。
 3. 未提供报价的外送候选仍参与排序，但输出 `needsQuoteBeforeConfirm=true`、`payableFen=null`。
 
 已验证：同一外送候选在回填报价前仅受商品价约束而通过，回填后按实付价被正确拒绝。

@@ -2077,6 +2077,119 @@ def tag_new_candidates(cands: List[Dict[str, Any]], menu: Dict[str, Any], prefs:
 
 
 
+def explain_families(
+    details: Dict[str, Dict[str, Any]],
+    menu: Dict[str, Any],
+    prefs: Dict[str, Any],
+    families: Sequence[str],
+    budget_fen: int,
+    cands: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Why each declared family produced (or did not produce) candidates.
+
+    A family that is declared but yields zero is either mis-declared, missing a
+    meal-detail snapshot, or pruned by budget. Reporting the concrete code and
+    amount makes that visible instead of silently shipping a smaller pool.
+    """
+    def tags_of(cand: Dict[str, Any]) -> set:
+        return set(cand.get("tags") or [])
+
+    def count_for(family: str) -> int:
+        return sum(1 for cand in cands if _matches_family(family, tags_of(cand)))
+
+    out: Dict[str, Any] = {}
+    for family in families:
+        row: Dict[str, Any] = {"generated": count_for(family)}
+        blockers: List[str] = []
+
+        if family == "dual_1plus1":
+            legs = discover_dual_legs(menu, details)
+            row["legs"] = {
+                "left": list(legs.left),
+                "right": list(legs.right),
+                "source": legs.source,
+            }
+            pairs = []
+            for right_code in legs.right:
+                for left_code in legs.left:
+                    missing = [code for code in (left_code, right_code) if code not in details]
+                    entry: Dict[str, Any] = {"left": left_code, "right": right_code}
+                    try:
+                        base = price_for(left_code, menu) + price_for(right_code, menu)
+                        entry["basePriceFen"] = base
+                    except ContractError:
+                        base = None
+                        entry["basePriceFen"] = None
+                        blockers.append(f"missing_menu_price:{left_code}+{right_code}")
+                    if missing:
+                        entry["missingDetail"] = missing
+                        blockers.append(f"missing_detail:{','.join(missing)}")
+                    elif base is not None and budget_fen > 0 and base > budget_fen:
+                        entry["overBudget"] = f"{base}>{budget_fen}"
+                        blockers.append(f"over_budget:{left_code}+{right_code}={base}>{budget_fen}")
+                    entry["generated"] = sum(
+                        1
+                        for cand in cands
+                        if _is_dual_candidate(cand)
+                        and {str(item.get("productCode") or "") for item in cand.get("items") or []}
+                        == {left_code, right_code}
+                    )
+                    pairs.append(entry)
+            row["pairs"] = pairs
+            if not legs.left or not legs.right:
+                blockers.append("no_discovered_legs")
+
+        elif family == "mcard_four":
+            codes = discover_mcard_four_codes(menu, details)
+            row["codes"] = codes
+            for code in codes:
+                if code not in details:
+                    blockers.append(f"missing_detail:{code}")
+                    continue
+                try:
+                    base = price_for(code, menu)
+                except ContractError:
+                    blockers.append(f"missing_menu_price:{code}")
+                    continue
+                if budget_fen > 0 and base > budget_fen:
+                    blockers.append(f"over_budget:{code}={base}>{budget_fen}")
+
+        elif family == "dabao":
+            codes = discover_dabao_codes(menu, details)
+            row["codes"] = codes
+            for code in codes:
+                if code not in details:
+                    blockers.append(f"missing_detail:{code}")
+                    continue
+                try:
+                    base = price_for(code, menu)
+                except ContractError:
+                    blockers.append(f"missing_menu_price:{code}")
+                    continue
+                if budget_fen > 0 and base > budget_fen:
+                    blockers.append(f"over_budget:{code}={base}>{budget_fen}")
+
+        elif family == "classic_three":
+            codes = discover_classic_three_codes(menu, int(budget_fen or 0), details)
+            row["codes"] = codes
+            if not codes:
+                blockers.append(f"no_menu_match_within_budget:{budget_fen}")
+            for code in codes:
+                if code not in details:
+                    blockers.append(f"missing_detail:{code}")
+
+        elif family == "coffee_combo":
+            codes = discover_breakfast_combo_codes(menu, budget_fen=budget_fen)
+            row["codes"] = codes
+            if not codes:
+                blockers.append("no_breakfast_combo_on_menu")
+
+        row["blockers"] = blockers
+        row["explained"] = bool(row["generated"]) or bool(blockers)
+        out[family] = row
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Expand McD candidates (profile-aware, no MCP/order)")
     ap.add_argument("--profile", help="profiles/<name>.json or path")
@@ -2155,6 +2268,14 @@ def main() -> int:
         raise SystemExit(f"input contract error: {exc}") from exc
 
     trimmed = trim_candidates(cands, int(args.max), families)
+    diagnostics = explain_families(
+        details,
+        menu,
+        base.get("prefs") or {},
+        families,
+        int(base.get("budgetFen") or 3500),
+        trimmed,
+    )
 
     out = deepcopy(base)
     # strip internal keys
@@ -2163,6 +2284,7 @@ def main() -> int:
             out.pop(k, None)
     out["candidateFamilies"] = families
     out["candidates"] = trimmed
+    out["candidateDiagnostics"] = diagnostics
     sel = dict(out.get("selection") or {})
     sel.setdefault("mode", "rank_then_random")
     sel.setdefault("topK", 5)
@@ -2187,6 +2309,14 @@ def main() -> int:
                 "candidates": len(trimmed),
                 "primaryMainCodes": mains,
                 "tagCounts": tag_counts,
+                "familyYield": {
+                    family: row["generated"] for family, row in diagnostics.items()
+                },
+                "familyBlockers": {
+                    family: row["blockers"]
+                    for family, row in diagnostics.items()
+                    if row["blockers"]
+                },
                 "output": str(out_path),
             },
             ensure_ascii=False,

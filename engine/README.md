@@ -47,10 +47,15 @@
 ```
 engine/
   profile_lib.py              # profile 解析、履约物化、历史读写
-  build_candidates.py         # 菜单 + detail → 候选组合
+  build_candidates.py         # 菜单 + detail → 候选组合（含家族产出诊断）
   score_lunch.py              # 硬过滤、打分、选择、响应组装
   mcp_contract.py             # MCP 快照校验与字段归一
-  budget.py                   # 堂食/外送预算口径
+  budget.py                   # 堂食/外送预算口径与报价绑定
+  quote_state.py              # 估价/已核价/过期三态与文案渲染
+  mcp_cache.py                # 按门店/履约/餐段/预约隔离的快照缓存
+  exposure_log.py             # 曝光/跳过/换餐/成交分轨（幂等）
+  combo_edit.py               # 点名套餐排序、换餐差异、pending/calc 同步
+  stage_timer.py              # 阶段计时与不可归因间隙
   evaluate_recommendations.py # 固定场景回归评估
   profiles/
     README.md
@@ -133,7 +138,9 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 
 - stdout 为 `RecommendResponse`，`items` 可直接交给外部调用方做 `calculate-price`
 - 离线引擎始终输出 `priceVerified=false`；输入中的历史验价标记不会被沿用
-- `payableFen` 为实付金额，外送未报价时为 `null`，并置 `needsQuoteBeforeConfirm=true`
+- 价态三值（`priceState`）：`estimate` 只有估价、`quoted` 有当前有效核价、`stale` 报价过期或与 items/上下文不匹配
+- 任何 `estimate` / `stale` 都输出 `needsQuoteBeforeConfirm=true`，`humanSummary` 用「估价」而不是「实付」；只有 `quoted` 才可能显示实付
+- `payableFen` 仅在 `quoted` 时有值；估价、过期报价、被拒报价一律为 `null`
 - 退出码：`0` 成功，`1` 无候选，`2` 输入错误或快照契约错误
 - 显式 `candidates=[]`、候选全部被过滤、或 fallback 门店不匹配时均不使用历史 fallback，失败响应 `items=[]`
 
@@ -144,7 +151,7 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 - 有报价时按 `payableFen` 判定，可产生 `over_budget_payable`
 - 无报价时仅当商品价已超预算才拒绝，否则放行但标记 `needsQuoteBeforeConfirm`
 
-调用方可将 `calculate-price` 的结果按 `rotationKey` 回填到请求的 `priceQuotes`，引擎据此覆盖商品价并写入实付价。
+调用方可将 `calculate-price` 的结果按 `rotationKey` 回填到请求的 `priceQuotes`。只有报价带有时间、未过期、items 与候选一致，且请求里已填的门店/履约/预约与报价一致时，才会写入实付；否则保持估价。
 
 ### 历史格式
 
@@ -158,6 +165,17 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 - **未见抬权**：窗口非空且该轨仍有未见 code 时乘对应系数；每轨最多抬一次。主食、小食、饮品可同时抬，但 `low_repeat` 不得超过 `lr_cap × unseenComboCap`
 - **空历史不抬权**，避免整体抬升淹没其它维度
 - 已选与未见对同一 code 互斥，不双计；两者均为软分，不影响预算硬门槛
+
+### 曝光 / 跳过 / 换餐 / 成交分轨
+
+history 只记录成交，因此"昨天推过但没点"在打分侧不可见。需要时由调用方提供独立的曝光日志（`exposure_log`，请求里用 `exposurePath` 或内联 `exposureEvents`）：
+
+- `exposure` 曝光、`skip` 跳过、`swap` 换餐、`deal` 成交四类事件分开写，互不合并
+- 写入幂等：同一 `(kind, 作用域, 日期, rotationKey, seq)` 只写一次
+- 跳过不写成交，也不推断"用户不喜欢"；小样本只做有上限的轮换降权
+- 没有曝光日志时不产生任何推断，`low_repeat` 口径不变
+
+详见 [../docs/observability-and-integration.md](../docs/observability-and-integration.md)。
 
 ## 打分与选择
 
@@ -185,6 +203,7 @@ query-meals → query-meal-detail（按 candidateFamilies）
 ```
 
 - 预约场景需带物化后的 `reservationDate` 与外送参数；外送不要复用堂食菜单缓存
+- `mcp_cache`、`stage_timer`、`combo_edit` 以及曝光日志都要调用方显式使用。当前例程未接入，不能把它们说成已经在午餐或早餐流程里生效
 - 会员资格导致的算价或下单失败由调用方处理，引擎不校验会员状态
 - 本仓库脚本禁止 `create-order`，也不提供常驻 HTTP 服务
 

@@ -27,6 +27,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import exposure_log
+import quote_state
 from budget import apply_quote, budget_check, payable_fen
 from mcp_contract import ContractError, rounds_of
 from profile_lib import (
@@ -432,6 +434,13 @@ def hard_filter(
     req: Dict[str, Any],
 ) -> Optional[str]:
     reason = budget_check(cand, req)
+    status = quote_state.price_status(cand, req)
+    cand.meta["priceState"] = status.state
+    cand.meta["priceLabel"] = status.label
+    if status.needs_quote:
+        # Any unverified price (estimate, stale quote, rejected quote) must be
+        # re-quoted before the user confirms — not only delivery totals.
+        cand.meta["needsQuoteBeforeConfirm"] = True
     if reason == "unverified_delivery_total":
         # Fees may still change the total; require a quote before confirming.
         cand.meta["needsQuoteBeforeConfirm"] = True
@@ -938,6 +947,50 @@ def candidate_family(cand: ScoredCandidate) -> str:
         return "coffee_combo"
     return "other"
 
+def apply_exposure_rotation(cands: List[ScoredCandidate], req: Dict[str, Any]) -> None:
+    """Bounded rotation for combos already shown but never accepted.
+
+    Deal history cannot express "shown yesterday, declined" — so the same combo
+    looks unseen the next day. This uses the separate exposure/skip log when the
+    caller supplies one (``exposurePath`` / ``exposureEvents``). Absent that log
+    it does nothing: an empty log must not be read as "user dislikes this".
+    """
+    prefs = req.get("prefs") or {}
+    if prefs.get("exposureRotation", True) is False:
+        return
+    log_path = req.get("exposurePath")
+    events = req.get("exposureEvents")
+    if isinstance(events, list) and events:
+        doc_events = events
+    elif log_path:
+        loaded = exposure_log.load_log(str(log_path))
+        if loaded.get("unreadable"):
+            # Do not treat a broken log as "never exposed", and do not invent a penalty.
+            for cand in cands:
+                if isinstance(getattr(cand, "meta", None), dict):
+                    cand.meta["exposureLogUnreadable"] = True
+            return
+        doc_events = loaded.get("events") or []
+    else:
+        return
+    if not doc_events:
+        return
+    try:
+        window_days = int(req.get("exposureWindowDays", exposure_log.DEFAULT_WINDOW_DAYS))
+    except (TypeError, ValueError):
+        window_days = exposure_log.DEFAULT_WINDOW_DAYS
+    scope = exposure_log.parse_scope(req)
+    summary = exposure_log.summarize(doc_events, scope=scope, window_days=window_days)
+    if not summary:
+        return
+    for cand in cands:
+        row = summary.get(cand.rotation_key)
+        if not row:
+            continue
+        exposure_log.apply_to_candidate(cand, row)
+        cand.meta["exposureScope"] = scope
+
+
 def has_coffee(cand: ScoredCandidate) -> bool:
     if coffee_hits(cand):
         return True
@@ -1382,7 +1435,7 @@ def candidates_from_request(req: Dict[str, Any]) -> Tuple[List[ScoredCandidate],
                 meta=meta,
             )
             if quote:
-                apply_quote(cand, quote)
+                apply_quote(cand, quote, req=req, items=cand.items)
             out.append(cand)
         if out:
             if any(c.get("priceVerified") for c in raw if isinstance(c, dict)):
@@ -1860,6 +1913,10 @@ def build_response(
     if not drink_codes:
         drink_codes = drink_codes_in(pick)
     drink_code = str(pick.meta.get("primaryDrinkCode") or (drink_codes[0] if drink_codes else "") or "")
+    status = quote_state.price_status(pick, req)
+    # One renderer for score/pending/calc: unverified prices read 估价, and only
+    # a live quote inside its window reads 实付.
+    summary = quote_state.compose_summary(pick.human_summary, status)
     return {
         "ok": True,
         "generatedAt": now_cst_iso(),
@@ -1867,12 +1924,15 @@ def build_response(
         "mealPeriod": meal_period(req),
         "profileId": req.get("profileId"),
         "rotationKey": pick.rotation_key,
-        "humanSummary": pick.human_summary,
+        "humanSummary": summary,
         "priceFen": pick.price_fen,
         "priceYuan": round(pick.price_fen / 100.0, 2),
-        "payableFen": payable_fen(pick, req),
-        "needsQuoteBeforeConfirm": bool(pick.meta.get("needsQuoteBeforeConfirm")),
-        "priceVerified": bool(pick.price_verified),
+        "payableFen": payable_fen(pick, req) if status.state == quote_state.QUOTED else None,
+        "priceState": status.state,
+        "priceLabel": status.label,
+        "quoteReason": status.reason,
+        "needsQuoteBeforeConfirm": bool(pick.meta.get("needsQuoteBeforeConfirm")) or status.needs_quote,
+        "priceVerified": bool(pick.price_verified) and status.state == quote_state.QUOTED,
         "takeWayCodeHint": str(req.get("dining") or "eat-in"),
         "mainCode": main_code,
         "mainName": _code_display_name(main_code, pick),
@@ -1887,6 +1947,14 @@ def build_response(
         "unseenMain": bool(pick.meta.get("unseenMain")),
         "unseenSide": bool(pick.meta.get("unseenSide")),
         "unseenDrink": bool(pick.meta.get("unseenDrink")),
+        "exposureLogUnreadable": bool(pick.meta.get("exposureLogUnreadable")),
+        "priorExposure": bool(pick.meta.get("priorExposure")),
+        "exposureCount": int(pick.meta.get("exposureCount") or 0),
+        "skipCount": int(pick.meta.get("skipCount") or 0),
+        "swapCount": int(pick.meta.get("swapCount") or 0),
+        "shownNotAccepted": int(pick.meta.get("shownNotAccepted") or 0),
+        "exposurePenalty": float(pick.meta.get("exposurePenalty") or 1.0),
+        "exposurePenaltyReason": str(pick.meta.get("exposurePenaltyReason") or ""),
         "score": pick.score,
         "scoreBreakdown": pick.breakdown,
         "rank": rank,
@@ -1928,6 +1996,9 @@ def error_response(
         "priceFen": 0,
         "priceYuan": 0,
         "payableFen": None,
+        "priceState": quote_state.ESTIMATE,
+        "priceLabel": quote_state.PRICE_LABELS[quote_state.ESTIMATE],
+        "quoteReason": "no_candidate",
         "needsQuoteBeforeConfirm": False,
         "priceVerified": False,
         "takeWayCodeHint": str(req.get("dining") or "eat-in"),
@@ -1986,6 +2057,7 @@ def run(req: Dict[str, Any], seed: Optional[int] = None) -> Tuple[Dict[str, Any]
         ), []
 
     apply_family_rotation(passed, req)
+    apply_exposure_rotation(passed, req)
     ranked = sorted(passed, key=lambda c: (-c.score, c.price_fen, c.rotation_key))
     rng = random.Random(seed)
     pick, alts, mode = select_from_ranked(ranked, req, rng)
