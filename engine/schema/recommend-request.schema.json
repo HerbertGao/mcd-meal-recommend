@@ -258,6 +258,16 @@
             "type": "string"
           },
           "description": "小食软偏好顺序。只影响候选截断时的排序，不排除菜单 round 里的其他小食；空数组表示不额外偏好"
+        },
+        "exposureRotation": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否按曝光/跳过日志做轻量轮换降权；false 关闭。未提供日志时该开关无副作用"
+        },
+        "quoteTtlMinutes": {
+          "type": "number",
+          "minimum": 0,
+          "description": "报价时效（分钟），也可写在请求顶层"
         }
       }
     },
@@ -461,6 +471,33 @@
     "historyPath": {
       "type": "string",
       "description": "历史文件路径；磁盘格式 version=2 含 mains[]/sides[]/entries[]"
+    },
+    "exposurePath": {
+      "type": "string",
+      "description": "曝光/跳过/换餐/成交分轨日志路径（exposure_log 格式）。只影响轮换软分，缺失时不产生任何推断"
+    },
+    "exposureEvents": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "内联曝光事件（与 exposurePath 二选一，便于离线回放）"
+    },
+    "exposureWindowDays": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 7,
+      "description": "曝光轮换的观察窗口天数；0 表示不按时间过滤"
+    },
+    "quoteTtlMinutes": {
+      "type": "number",
+      "minimum": 0,
+      "description": "calculate-price 结果的时效（分钟）。超过后视为过期，必须重新核价"
+    },
+    "candidateDiagnostics": {
+      "type": "object",
+      "description": "build_candidates 输出的家族产出与阻断原因（为什么某个声明家族 0 条）",
+      "additionalProperties": true
     },
     "priceQuotes": {
       "type": "object",

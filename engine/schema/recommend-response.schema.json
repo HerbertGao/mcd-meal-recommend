@@ -48,7 +48,24 @@
     },
     "needsQuoteBeforeConfirm": {
       "type": "boolean",
-      "description": "true 表示外送总价尚未确认，确认前必须先调用 calculate-price"
+      "description": "true 表示价格尚未由当前流程的 calculate-price 确认（估价、过期报价或被拒绝的报价），确认前必须重新核价"
+    },
+    "priceState": {
+      "type": "string",
+      "enum": [
+        "estimate",
+        "quoted",
+        "stale"
+      ],
+      "description": "estimate=仅估价；quoted=有效核价；stale=报价已过期或与 items/上下文不匹配，需重新核价"
+    },
+    "priceLabel": {
+      "type": "string",
+      "description": "面向用户的价态文案（估价 / 已核价 / 核价已过期）"
+    },
+    "quoteReason": {
+      "type": "string",
+      "description": "价态依据，例如 no_quote / ok / expired / items_mismatch / context_mismatch:storeCode"
     },
     "takeWayCodeHint": {
       "type": "string",
@@ -296,6 +313,35 @@
     },
     "unseenDrink": {
       "type": "boolean"
+    },
+    "priorExposure": {
+      "type": "boolean",
+      "description": "true 表示曝光/跳过日志里出现过同一 rotationKey（仅来自显式 exposure 日志，不来自成交历史）"
+    },
+    "exposureCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skipCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "swapCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "shownNotAccepted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "exposurePenalty": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "已曝光未接受的轻量轮换系数（有上限，非厌恶判定）"
+    },
+    "exposurePenaltyReason": {
+      "type": "string"
     }
   },
   "allOf": [
