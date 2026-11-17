@@ -307,6 +307,7 @@ class OfflineContractTest(unittest.TestCase):
         cases = {
             "mk0884_522032_4810": "mcard_four",
             "sj1120+zl505416_w4105": "dual_1plus1",
+            "t26651_1120_4810_522021__1450_4810_522021": "dual_1plus1",
             "db6670_1100_4810": "dabao",
             "ct4064_1440_4810": "classic_three",
             "bf3360_521315_900479": "coffee_combo",
@@ -352,6 +353,24 @@ class OfflineContractTest(unittest.TestCase):
         ranked = sorted(cands, key=lambda c: -c.score)
         self.assertEqual(ranked[0].rotation_key, "db0002_b")
         self.assertEqual(strong.meta.get("familyRotationFactor"), 0.55)
+
+        dual = cand("sj1120_a", 60.0, "dual11", "1120")
+        other = cand("db0003_c", 40.0, "dabao", "1100")
+        again = [dual, other]
+        score_lunch.apply_family_rotation(
+            again,
+            {
+                "prefs": {"familyRepeatPenalty": 0.55},
+                "history": [
+                    {
+                        "date": "2026-01-02",
+                        "rotationKey": "t26651_1120_4810_522021__1450_4810_522021",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(sorted(again, key=lambda c: -c.score)[0].rotation_key, "db0003_c")
+        self.assertEqual(dual.meta.get("familyRotationFactor"), 0.55)
 
     def test_shipped_profiles_use_rank_only(self):
         # Uniform random over a family-interleaved pool can surface a far

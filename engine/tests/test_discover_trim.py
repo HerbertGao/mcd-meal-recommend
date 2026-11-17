@@ -13,6 +13,7 @@ EXAMPLES = ENGINE / "examples"
 sys.path.insert(0, str(ENGINE))
 
 import build_candidates as bc  # noqa: E402
+import score_lunch  # noqa: E402
 from mcp_contract import load_snapshot  # noqa: E402
 
 
@@ -69,7 +70,11 @@ def dual_detail_6651():
     }
 
 
-def dual_detail_6668():
+SNACK_RIGHT = "9900091668"
+
+
+def dual_detail_snack_right():
+    """合成的小食右腿。不是 9900016668，那个码已经改成左腿形状。"""
     return {
         "name": "真有料随心配1+1",
         "rounds": [
@@ -87,6 +92,29 @@ def dual_detail_6668():
     }
 
 
+def dual_detail_6668():
+    """9900016668 改版后的左腿：红区汉堡，白区饮品多于小食。"""
+    return {
+        "name": "炸鸡随心配1+1",
+        "rounds": [
+            {
+                "id": "1",
+                "name": "红区",
+                "choices": [choice("1120", "双层吉士汉堡"), choice("521147", "麦辣鸡排堡")],
+            },
+            {
+                "id": "2",
+                "name": "饮料",
+                "choices": [
+                    choice("522021", "无糖可乐大杯"),
+                    choice("3050", "雪碧中杯"),
+                    choice("4105", "菠萝派"),
+                ],
+            },
+        ],
+    }
+
+
 def indexed(code, name, price):
     return {"code": code, "name": name, "currentPrice": price}
 
@@ -95,7 +123,9 @@ class DealDiscoveryTest(unittest.TestCase):
     def test_classify_by_name_and_by_round_shape(self):
         self.assertEqual(bc.classify_dual_role("随心配1+1三件套!!!", dual_detail_6651()), "left_three")
         self.assertEqual(bc.classify_dual_role("双吉随心配1+1", dual_detail_6655()), "left_burger")
-        self.assertEqual(bc.classify_dual_role("真有料随心配1+1", dual_detail_6668()), "right")
+        self.assertEqual(bc.classify_dual_role("真有料随心配1+1", dual_detail_snack_right()), "right")
+        self.assertEqual(bc.classify_dual_role("炸鸡随心配1+1", dual_detail_6668()), "left_burger")
+        self.assertEqual(bc.classify_dual_role("9900016668", dual_detail_6668()), "left_burger")
 
         unnamed_left = {
             "name": "随心配1+1新品桶",
@@ -132,7 +162,7 @@ class DealDiscoveryTest(unittest.TestCase):
                     "meals": [
                         indexed("9900016651", "随心配1+1三件套!!!", "21.90"),
                         indexed("9900016655", "双吉随心配1+1", "13.90"),
-                        indexed("9900016668", "真有料随心配1+1", "14.90"),
+                        indexed(SNACK_RIGHT, "真有料随心配1+1", "14.90"),
                         indexed("9900016999", "开心乐园随心配", "20.00"),
                     ],
                 }
@@ -140,7 +170,7 @@ class DealDiscoveryTest(unittest.TestCase):
             "mealIndex": {
                 "9900016651": {"name": "随心配1+1三件套!!!", "currentPrice": "21.90"},
                 "9900016655": {"name": "双吉随心配1+1", "currentPrice": "13.90"},
-                "9900016668": {"name": "真有料随心配1+1", "currentPrice": "14.90"},
+                SNACK_RIGHT: {"name": "真有料随心配1+1", "currentPrice": "14.90"},
                 "9900010000": {"name": "旧退路左腿", "currentPrice": "9.00"},
                 "9900010001": {"name": "旧退路右腿", "currentPrice": "9.00"},
             },
@@ -148,7 +178,7 @@ class DealDiscoveryTest(unittest.TestCase):
         details = {
             "9900016651": dual_detail_6651(),
             "9900016655": dual_detail_6655(),
-            "9900016668": dual_detail_6668(),
+            SNACK_RIGHT: dual_detail_snack_right(),
         }
         saved = (bc.FALLBACK_DUAL_LEFT, bc.FALLBACK_DUAL_RIGHT, bc.DUAL11_LEFT, bc.DUAL11_RIGHT)
         bc.FALLBACK_DUAL_LEFT = ["9900010000"]
@@ -159,10 +189,10 @@ class DealDiscoveryTest(unittest.TestCase):
             legs = bc.discover_dual_legs(menu, details)
             self.assertEqual(legs.source, "menu")
             self.assertEqual(legs.left, ["9900016651", "9900016655"])
-            self.assertEqual(legs.right, ["9900016668"])
+            self.assertEqual(legs.right, [SNACK_RIGHT])
             self.assertEqual(legs.roles["9900016651"], "left_three")
             self.assertEqual(legs.roles["9900016655"], "left_burger")
-            self.assertEqual(legs.roles["9900016668"], "right")
+            self.assertEqual(legs.roles[SNACK_RIGHT], "right")
             self.assertNotIn("9900016999", legs.left + legs.right)
             self.assertNotIn("9900010000", legs.left + legs.right)
             cands = bc.expand_dual_1plus1(details, menu, ["522021"], "0-0", budget_fen=5000)
@@ -170,9 +200,12 @@ class DealDiscoveryTest(unittest.TestCase):
             bc.FALLBACK_DUAL_LEFT, bc.FALLBACK_DUAL_RIGHT, bc.DUAL11_LEFT, bc.DUAL11_RIGHT = saved
         codes_6651 = [c for c in cands if "9900016651" in product_codes(c)]
         codes_6655 = [c for c in cands if "9900016655" in product_codes(c)]
-        self.assertGreaterEqual(len(codes_6651), 4)
+        paired_6651 = [c for c in codes_6651 if SNACK_RIGHT in product_codes(c)]
+        doubled_6651 = [c for c in codes_6651 if product_codes(c) == ["9900016651", "9900016651"]]
+        self.assertGreaterEqual(len(paired_6651), 4)
+        self.assertTrue(doubled_6651)
         self.assertGreaterEqual(len(codes_6655), 1)
-        self.assertTrue(all("9900016668" in product_codes(c) for c in codes_6651))
+        self.assertTrue(all(SNACK_RIGHT in product_codes(c) for c in codes_6655))
 
     def test_fallback_used_only_without_category_or_name_signal(self):
         menu = {
@@ -185,7 +218,8 @@ class DealDiscoveryTest(unittest.TestCase):
         legs = bc.discover_dual_legs(menu, {})
         self.assertEqual(legs.source, "fallback")
         self.assertEqual(legs.left, ["9900016655", "9900016651"])
-        self.assertEqual(legs.right, ["9900016668"])
+        self.assertEqual(legs.right, [])
+        self.assertNotIn("9900016668", legs.left + legs.right)
 
         named = {
             "mealIndex": {
@@ -308,7 +342,137 @@ class DealDiscoveryTest(unittest.TestCase):
                 "sj1450+zl1401_w4106_3050",
             },
         )
-        self.assertTrue(all(product_codes(c) == ["9900016655", "9900016668"] for c in cands))
+        self.assertTrue(all(product_codes(c) == ["9900016655", SNACK_RIGHT] for c in cands))
+        roles = bc.discover_dual_legs(menu, details).roles
+        self.assertEqual(roles["9900016668"], "left_burger")
+        self.assertEqual(roles[SNACK_RIGHT], "right")
+
+    def test_two_left_three_when_redesigned_sku_leaves_no_right_leg(self):
+        """右腿名单空、6668 已是左腿时，两份 9900016651 仍要进候选，并写明旧右腿改了名或轮次。"""
+        menu = {
+            "categories": [
+                {
+                    "name": "随心配1+1",
+                    "meals": [
+                        indexed("9900016651", "随心配1+1三件套!!!", "14.90"),
+                        indexed("9900016655", "双吉随心配1+1", "13.90"),
+                        indexed("9900016668", "炸鸡随心配1+1", "14.90"),
+                    ],
+                }
+            ],
+            "mealIndex": {
+                "9900016651": {"name": "随心配1+1三件套!!!", "currentPrice": "14.90"},
+                "9900016655": {"name": "双吉随心配1+1", "currentPrice": "13.90"},
+                "9900016668": {"name": "炸鸡随心配1+1", "currentPrice": "14.90"},
+            },
+        }
+        details = {
+            "9900016651": dual_detail_6651(),
+            "9900016655": dual_detail_6655(),
+            "9900016668": dual_detail_6668(),
+        }
+        legs = bc.discover_dual_legs(menu, details)
+        self.assertEqual(legs.right, [])
+        self.assertEqual(legs.roles["9900016668"], "left_burger")
+        self.assertEqual(legs.roles["9900016651"], "left_three")
+        self.assertIn("9900016668", legs.left)
+
+        cands = bc.expand_dual_1plus1(details, menu, ["522021"], "0-0", budget_fen=3500)
+        doubled = [c for c in cands if product_codes(c) == ["9900016651", "9900016651"]]
+        self.assertTrue(doubled)
+        self.assertTrue(all("9900016668" not in product_codes(c) for c in cands))
+        self.assertTrue(all(c["listPriceFen"] <= 3500 for c in doubled))
+        self.assertTrue(all(c["listPriceFen"] == 2980 for c in doubled))
+        self.assertNotIn("9900016668", bc.FALLBACK_DUAL_RIGHT)
+        sample = doubled[0]
+        self.assertEqual(len(sample["items"]), 2)
+        self.assertTrue(all(item["quantity"] == 1 for item in sample["items"]))
+        self.assertIn("two_left_three", sample["tags"])
+        flat_codes = []
+        for item in sample["items"]:
+            item_codes = []
+            for rnd in item["roundList"]:
+                for ci in rnd["comboItemList"]:
+                    item_codes.append(ci["code"])
+                    if ci["code"] in {"4810", "4800", "522021", "3050"}:
+                        self.assertTrue(ci.get("name"))
+            flat_codes.append(item_codes)
+            self.assertTrue(set(item_codes) & {"4810", "4800"})
+            self.assertTrue(set(item_codes) & {"522021", "3050"})
+        scored = score_lunch.ScoredCandidate(
+            rotation_key=sample["rotationKey"],
+            human_summary=sample["humanSummary"],
+            price_fen=sample["listPriceFen"],
+            items=sample["items"],
+            tags=sample["tags"],
+            meta={"sideCodes": sample["sideCodes"], "drinkCodes": sample["drinkCodes"]},
+        )
+        req = {
+            "budgetFen": 3500,
+            "dining": "eat-in",
+            "mealPeriod": "lunch",
+            "prefs": {
+                "satiety": "high",
+                "priority": ["mcard_four", "dual_1plus1", "classic_three"],
+            },
+            "satiety": {
+                "requireMain": True,
+                "requireSideOrChicken": True,
+                "requireDrink": True,
+                "forbidDrinkOnlyCombo": True,
+            },
+        }
+        self.assertIsNone(score_lunch.hard_filter(scored, req))
+
+        diag = bc.explain_families(details, menu, {}, ["dual_1plus1"], 3500, cands)
+        blockers = diag["dual_1plus1"]["blockers"]
+        self.assertIn("no_discovered_legs", blockers)
+        self.assertTrue(
+            any(
+                item == "stale_right_leg:9900016668:classified_as_left_burger:name_or_rounds_changed"
+                for item in blockers
+            )
+        )
+        self.assertGreater(diag["dual_1plus1"]["generated"], 0)
+        self.assertEqual(score_lunch.BASE_CAPS["classic_three"], 12.0)
+        self.assertEqual(score_lunch.BASE_CAPS["dual_1plus1"], 16.0)
+        lunch_priority = score_lunch.DEFAULT_PRIORITY_BY_PERIOD["lunch"]
+        self.assertLess(lunch_priority.index("dual_1plus1"), lunch_priority.index("classic_three"))
+
+    def test_fallback_listed_right_sku_reclassified_left_is_diagnosed(self):
+        """退路右腿名单里的码若当前轮次已是左腿，不能再进 right，并要说明改了名或轮次。"""
+        menu = {
+            "mealIndex": {
+                "9900010001": {"currentPrice": "14.90"},
+                "9900016651": {"currentPrice": "14.90"},
+            }
+        }
+        details = {
+            "9900010001": {
+                "name": "新品桶",
+                "rounds": [
+                    {"id": "1", "name": "红区", "choices": [choice("1100", "巨无霸")]},
+                    {"id": "2", "name": "饮料", "choices": [choice("3050", "雪碧中杯")]},
+                ],
+            }
+        }
+        saved = bc.FALLBACK_DUAL_RIGHT
+        bc.FALLBACK_DUAL_RIGHT = ["9900010001"]
+        try:
+            legs = bc.discover_dual_legs(menu, details)
+            self.assertEqual(legs.source, "fallback")
+            self.assertEqual(legs.right, [])
+            self.assertIn("9900010001", legs.left)
+            self.assertEqual(legs.roles["9900010001"], "left_burger")
+            diag = bc.explain_families(details, menu, {}, ["dual_1plus1"], 3500, [])
+        finally:
+            bc.FALLBACK_DUAL_RIGHT = saved
+        blockers = diag["dual_1plus1"]["blockers"]
+        self.assertIn("no_discovered_legs", blockers)
+        self.assertIn(
+            "stale_right_leg:9900010001:classified_as_left_burger:name_or_rounds_changed",
+            blockers,
+        )
 
 
 def _mcard_flood_detail(mains):
@@ -367,7 +531,7 @@ class TrimDiversityTest(unittest.TestCase):
                     "tags": ["dual11"],
                     "items": [
                         {"productCode": "9900016655"},
-                        {"productCode": "9900016668"},
+                        {"productCode": SNACK_RIGHT},
                     ],
                 }
             )
@@ -380,7 +544,7 @@ class TrimDiversityTest(unittest.TestCase):
                     "tags": ["dual11"],
                     "items": [
                         {"productCode": "9900016651"},
-                        {"productCode": "9900016668"},
+                        {"productCode": SNACK_RIGHT},
                     ],
                 }
             )
@@ -438,7 +602,7 @@ class TrimDiversityTest(unittest.TestCase):
                     "name": "随心配1+1",
                     "meals": [
                         indexed("9900016655", "双吉随心配1+1", "13.90"),
-                        indexed("9900016668", "真有料随心配1+1", "14.90"),
+                        indexed(SNACK_RIGHT, "真有料随心配1+1", "14.90"),
                         indexed("9900016651", "随心配1+1三件套!!!", "21.90"),
                     ],
                 },
@@ -447,7 +611,7 @@ class TrimDiversityTest(unittest.TestCase):
                 "9900000884": {"name": "酥酥多笋卷四件套", "currentPrice": "28"},
                 "9900090001": {"name": "新主堡四件套", "currentPrice": "30"},
                 "9900016655": {"name": "双吉随心配1+1", "currentPrice": "13.90"},
-                "9900016668": {"name": "真有料随心配1+1", "currentPrice": "14.90"},
+                SNACK_RIGHT: {"name": "真有料随心配1+1", "currentPrice": "14.90"},
                 "9900016651": {"name": "随心配1+1三件套!!!", "currentPrice": "21.90"},
             },
         }
@@ -455,7 +619,7 @@ class TrimDiversityTest(unittest.TestCase):
             "9900000884": _mcard_flood_detail(mains_a),
             "9900090001": _mcard_flood_detail(mains_b),
             "9900016655": dual_detail_6655(),
-            "9900016668": dual_detail_6668(),
+            SNACK_RIGHT: dual_detail_snack_right(),
             "9900016651": dual_detail_6651(),
         }
         base = {
@@ -518,7 +682,7 @@ class TrimDiversityTest(unittest.TestCase):
         left_burger = "9900016655"
         left_plain = "9900091001"
         left_three = "9900016651"
-        right = "9900016668"
+        right = SNACK_RIGHT
         right_plain = "9900091002"
         menu = {
             "categories": [
@@ -643,7 +807,7 @@ class TrimDiversityTest(unittest.TestCase):
 
     def test_max_splits_seats_by_left_leg_when_items_lead_with_right(self):
         """items 把真有料放前面时，--max 仍按两条左腿轮转，不合成一个右腿桶。"""
-        right = "9900016668"
+        right = SNACK_RIGHT
         left_a = "9900016655"
         left_b = "9900016651"
         left_c = "9900091001"

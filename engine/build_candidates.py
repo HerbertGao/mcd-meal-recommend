@@ -41,12 +41,17 @@ FALLBACK_MCARD_FOUR_CODES = [
     "9900006957",  # 安格斯厚牛堡四件套随心选 ¥37（预算外由 scorer 淘汰）
 ]
 FALLBACK_DUAL_LEFT = ["9900016655", "9900016651"]  # 双吉 / 三件套左腿
-FALLBACK_DUAL_RIGHT = ["9900016668"]  # 真有料右腿
+# 没有已知的现役小食右腿。右腿必须看当日名称和轮次，不能把旧码写死在这里。
+FALLBACK_DUAL_RIGHT: List[str] = []
+# 9900016668 曾经是「真有料随心配1+1」右腿。2026-11-06 到 2026-11-10 之间
+# 改成「炸鸡随心配1+1」，红区是汉堡、白区饮品多于小食，已经是左腿。
+# 只用于诊断「旧右腿改了名或轮次」，不再把它配成右腿。
+FORMER_DUAL_RIGHT_CODES = ["9900016668"]
 FALLBACK_DABAO_CODES = ["9900016670", "9900016671", "9900016673", "9900016674"]
 # 旧名只是退路别名。发现逻辑不把它们当作唯一名单。
 MCARD_FOUR_CODES = FALLBACK_MCARD_FOUR_CODES
 DUAL11_LEFT = FALLBACK_DUAL_LEFT
-DUAL11_RIGHT = FALLBACK_DUAL_RIGHT[0]
+DUAL11_RIGHT = FALLBACK_DUAL_RIGHT[0] if FALLBACK_DUAL_RIGHT else ""
 DABAO_IDS = FALLBACK_DABAO_CODES
 COFFEE_CODES_PREF = ["520688", "521327", "507411", "507368", "507409", "507328"]  # cheaper 鲜萃 first
 COFFEE_NAME_RE = re.compile(r"(咖啡|拿铁|美式|卡布|奶铁|鲜萃冰咖|鲜萃咖啡)", re.I)
@@ -138,7 +143,7 @@ def is_sideish(ch: Dict[str, Any]) -> bool:
         return True
     if ch["code"] in NON_DRINK_WHITE or SIDE_RE.search(ch["name"]):
         return True
-    return ch["code"] in {"505416", "521156", "1401", "4800", "4810"}
+    return ch["code"] in {"505416", "521156", "1401", "4800", "4810", "515106"}
 
 
 def pick_drink(choices: List[Dict[str, Any]], prefer: List[str]) -> Optional[Dict[str, Any]]:
@@ -160,6 +165,8 @@ def pick_drink(choices: List[Dict[str, Any]], prefer: List[str]) -> Optional[Dic
 MAX_CHOICES_PER_SIDE_ROUND = 4
 MAX_SIDE_COMBOS_PER_MAIN = 8
 MAX_DRINKS_PER_SELECTION = 4
+# 两份 left_three 的配对数。先保留同款选项，再错开，避免两套三件套的笛卡尔积撑满候选池。
+MAX_TWO_LEFT_PAIRS = 24
 
 
 def _choice_sort_key(ch: Dict[str, Any], prefer: Sequence[str]) -> Tuple[int, int, str]:
@@ -411,7 +418,13 @@ def build_round_combo(
         round_list.append(
             {
                 "round": rnd["id"],
-                "comboItemList": [combo_item(ch["code"], ice_mod(ice_key) if iced else None)],
+                "comboItemList": [
+                    combo_item(
+                        ch["code"],
+                        ice_mod(ice_key) if iced else None,
+                        str(ch.get("name") or ""),
+                    )
+                ],
             }
         )
         bit = str(ch.get("name") or ch.get("code") or "")
@@ -446,8 +459,15 @@ def build_round_combo(
     return cand
 
 
-def combo_item(code: str, mod: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def combo_item(
+    code: str,
+    mod: Optional[Dict[str, Any]] = None,
+    name: str = "",
+) -> Dict[str, Any]:
     d: Dict[str, Any] = {"code": code, "quantity": 1}
+    label = str(name or "").strip()
+    if label:
+        d["name"] = label
     if mod:
         d["modification"] = mod
     return d
@@ -473,18 +493,31 @@ def build_dual(
     mid_b = [r for r in rounds_b if r["id"] not in (rb["id"], wb["id"])]
 
     def item(pcode, det, red, white, mid, red_ch, white_ch, with_ice: bool):
-        rl = [{"round": red["id"], "comboItemList": [combo_item(red_ch["code"])]}]
+        rl = [
+            {
+                "round": red["id"],
+                "comboItemList": [combo_item(red_ch["code"], name=str(red_ch.get("name") or ""))],
+            }
+        ]
         for m in mid:
             if m["choices"]:
+                mid_choice = m["choices"][0]
                 rl.append(
                     {
                         "round": m["id"],
-                        "comboItemList": [combo_item(m["choices"][0]["code"])],
+                        "comboItemList": [
+                            combo_item(mid_choice["code"], name=str(mid_choice.get("name") or ""))
+                        ],
                     }
                 )
         mod = ice_mod(ice_key) if with_ice else None
         rl.append(
-            {"round": white["id"], "comboItemList": [combo_item(white_ch["code"], mod)]}
+            {
+                "round": white["id"],
+                "comboItemList": [
+                    combo_item(white_ch["code"], mod, str(white_ch.get("name") or ""))
+                ],
+            }
         )
         return {
             "productCode": pcode,
@@ -534,11 +567,11 @@ def build_dabao(
             "productName": str(det.get("name") or code),
             "quantity": 1,
             "roundList": [
-                {"round": r_burger["id"], "comboItemList": [combo_item(burger["code"])]},
-                {"round": r_side["id"], "comboItemList": [combo_item(side["code"])]},
+                {"round": r_burger["id"], "comboItemList": [combo_item(burger["code"], name=str(burger.get("name") or ""))]},
+                {"round": r_side["id"], "comboItemList": [combo_item(side["code"], name=str(side.get("name") or ""))]},
                 {
                     "round": r_drink["id"],
-                    "comboItemList": [combo_item(drink["code"], ice_mod(ice_key))],
+                    "comboItemList": [combo_item(drink["code"], ice_mod(ice_key), str(drink.get("name") or ""))],
                 },
             ],
         }
@@ -595,11 +628,11 @@ def build_classic_three(
             "productName": str(det.get("name") or det.get("productName") or code),
             "quantity": 1,
             "roundList": [
-                {"round": r_burger["id"], "comboItemList": [combo_item(burger["code"])]},
-                {"round": r_side["id"], "comboItemList": [combo_item(side["code"])]},
+                {"round": r_burger["id"], "comboItemList": [combo_item(burger["code"], name=str(burger.get("name") or ""))]},
+                {"round": r_side["id"], "comboItemList": [combo_item(side["code"], name=str(side.get("name") or ""))]},
                 {
                     "round": r_drink["id"],
-                    "comboItemList": [combo_item(drink["code"], ice_mod(ice_key))],
+                    "comboItemList": [combo_item(drink["code"], ice_mod(ice_key), str(drink.get("name") or ""))],
                 },
             ],
         }
@@ -756,8 +789,11 @@ def _menu_product_name(menu: Dict[str, Any], code: str, detail: Optional[Dict[st
 def classify_dual_role(name: str, detail: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """双 1+1 角色：left_three / left_burger / right。
 
-    名称里的「真有料 / 三件套 / 双吉」优先；没有这些词时看 detail 轮次形状
-    （主食+饮品，或 3 轮三件套，对小食蛋白+配菜）。
+    只看当前名称和 detail 轮次，不看商品码曾经扮演过的角色。
+    名称里的「真有料 / 三件套 / 双吉」优先；没有这些词时看轮次形状
+    （主食+饮品，或 3 轮三件套，对小食蛋白+配菜且白区小食不少于饮品）。
+    例如 9900016668 现在叫「炸鸡随心配1+1」、红区是汉堡、白区饮品更多，
+    应判成 left_burger，而不是因为旧名「真有料」继续当右腿。
     """
     label = str(name or "")
     if "真有料" in label:
@@ -800,25 +836,47 @@ def _dual_rejected(name: str) -> bool:
     return bool(SHARE_MEAL_RE.search(name) or OTHER_DEAL_RE.search(name))
 
 
-def _fallback_dual_legs(menu: Dict[str, Any], details: Dict[str, Any]) -> DualLegs:
-    present = _present_codes(menu, details)
-    right: List[str] = []
-    for code in _as_codes(FALLBACK_DUAL_RIGHT):
-        if code in present and code not in right:
+def _assign_fallback_leg(
+    code: str,
+    default_role: str,
+    menu: Dict[str, Any],
+    details: Dict[str, Any],
+    left: List[str],
+    right: List[str],
+    roles: Dict[str, str],
+) -> None:
+    """退路码也按当前名称/轮次归边。认不出时才用名单上的默认边。"""
+    if code in roles:
+        return
+    detail = details.get(code)
+    role = classify_dual_role(_menu_product_name(menu, code, detail), detail) or default_role
+    if role == "right":
+        if code not in right:
             right.append(code)
-    left: List[str] = []
-    for code in _as_codes(FALLBACK_DUAL_LEFT):
-        if code in present and code not in right and code not in left:
+    elif role in ("left_three", "left_burger"):
+        if code not in left:
             left.append(code)
+    else:
+        return
+    roles[code] = role
+
+
+def _fallback_dual_legs(menu: Dict[str, Any], details: Dict[str, Any]) -> DualLegs:
+    """菜单没有 1+1 信号时的退路。
+
+    仍按当前名称和轮次分左右。退路右腿名单里的码如果已经被分成左腿，
+    就放进左腿，不再按旧身份塞进右腿。名单为空表示当前没有可硬编码的右腿。
+    """
+    present = _present_codes(menu, details)
+    left: List[str] = []
+    right: List[str] = []
     roles: Dict[str, str] = {}
-    for code in right:
-        detail = details.get(code)
-        role = classify_dual_role(_menu_product_name(menu, code, detail), detail)
-        roles[code] = role or "right"
-    for code in left:
-        detail = details.get(code)
-        role = classify_dual_role(_menu_product_name(menu, code, detail), detail)
-        roles[code] = role or "left_burger"
+    for code in _as_codes(FALLBACK_DUAL_RIGHT):
+        if code in present:
+            _assign_fallback_leg(code, "right", menu, details, left, right, roles)
+    for code in _as_codes(FALLBACK_DUAL_LEFT):
+        if code in present:
+            _assign_fallback_leg(code, "left_burger", menu, details, left, right, roles)
     return DualLegs(left, right, "fallback", roles)
 
 
@@ -826,7 +884,11 @@ def discover_dual_legs(
     menu: Dict[str, Any],
     details: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> DualLegs:
-    """从「随心配 / 1+1」分类、名称或标签发现左/右腿。没有信号时才用退路码。"""
+    """从「随心配 / 1+1」分类、名称或标签发现左/右腿。没有信号时才用退路码。
+
+    右腿只来自当前名称或轮次形状。以前写在退路里的右腿码，只要现在被分成左腿，
+    就出现在 left 里，不会因为商品码没变而留在 right。
+    """
     details = details or {}
     signaled = [product for product in iter_menu_products(menu) if _dual_signaled(product)]
     if not signaled:
@@ -1124,19 +1186,25 @@ def build_breakfast_coffee(
     r_drink = roles["drink"] or rounds[-1]
     r_side = roles["side"]
     round_list: List[Dict[str, Any]] = [
-        {"round": r_main["id"], "comboItemList": [combo_item(main["code"])]},
+        {"round": r_main["id"], "comboItemList": [combo_item(main["code"], name=str(main.get("name") or ""))]},
     ]
     if side and r_side:
-        round_list.append({"round": r_side["id"], "comboItemList": [combo_item(side["code"])]})
+        round_list.append(
+            {"round": r_side["id"], "comboItemList": [combo_item(side["code"], name=str(side.get("name") or ""))]}
+        )
     # ice only when drink looks cold / has 冰 in name; still pass ice_key (去冰) for iced coffee
-    drink_name = drink.get("name") or ""
+    drink_name = str(drink.get("name") or "")
     use_ice = ("冰" in drink_name) or ("冰" in (det.get("name") or ""))
     mod = ice_mod(ice_key) if use_ice else None
     # many McCafé choices still expose 去冰 keys even on 热 — prefer applying when ice_key set and iced
     if use_ice:
-        round_list.append({"round": r_drink["id"], "comboItemList": [combo_item(drink["code"], mod)]})
+        round_list.append(
+            {"round": r_drink["id"], "comboItemList": [combo_item(drink["code"], mod, drink_name)]}
+        )
     else:
-        round_list.append({"round": r_drink["id"], "comboItemList": [combo_item(drink["code"])]})
+        round_list.append(
+            {"round": r_drink["id"], "comboItemList": [combo_item(drink["code"], name=drink_name)]}
+        )
     side_bit = f"+{side['name']}" if side else ""
     ice_bit = "去冰" if use_ice else ""
     rk = f"bf{code[-4:]}_{main['code']}_{side['code'] if side else 'noside'}_{drink['code']}"
@@ -1411,23 +1479,243 @@ def _dual_left_mains(red: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _two_left_pair_indexes(count: int, limit: int):
+    """先配两份相同选项，再按错位配不同选项。每个下标对最多出现一次。"""
+    if count <= 0 or limit <= 0:
+        return
+    produced = 0
+    for i in range(count):
+        yield i, i
+        produced += 1
+        if produced >= limit:
+            return
+    for offset in range(1, count):
+        for i in range(count - offset):
+            yield i, i + offset
+            produced += 1
+            if produced >= limit:
+                return
+
+
+def _left_three_specs(
+    det: Dict[str, Any],
+    prefer: Sequence[str],
+    prefer_sides: Sequence[str],
+    pair_base: int,
+    budget_fen: Optional[int],
+) -> List[Dict[str, Any]]:
+    """一份 left_three 的主食/小食/饮品装配，沿用小食轮转和饮品预算截断。"""
+    rounds = rounds_of(det)
+    main_r, side_rounds, drink_r = split_meal_rounds(rounds)
+    if not main_r or not drink_r or not side_rounds:
+        return []
+    mains = _dual_left_mains(main_r)
+    pools = side_pools(side_rounds, prefer_sides)
+    if not mains or not pools:
+        return []
+    specs: List[Dict[str, Any]] = []
+    for main in mains:
+        def accept(side_chs: Sequence[Dict[str, Any]], _main: Dict[str, Any] = main) -> bool:
+            return _within_budget(pair_base, [_main] + list(side_chs), budget_fen)
+
+        for combo in iter_side_combos(pools, MAX_SIDE_COMBOS_PER_MAIN, accept):
+            side_chs = [ch for _, ch in combo]
+            drinks = select_drinks(
+                list(drink_r.get("choices") or []),
+                prefer,
+                False,
+                pair_base,
+                [main] + side_chs,
+                budget_fen,
+            )
+            for drink in drinks:
+                specs.append(
+                    {
+                        "main_round": main_r,
+                        "main": main,
+                        "side_picks": combo,
+                        "drink_round": drink_r,
+                        "drink": drink,
+                    }
+                )
+    return specs
+
+
+def _spec_parts(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [spec["main"], spec["drink"]] + [ch for _, ch in spec["side_picks"]]
+
+
+def _spec_token(spec: Dict[str, Any]) -> str:
+    sides = "_".join(str(ch.get("code") or "") for _, ch in spec["side_picks"]) or "noside"
+    return f"{spec['main']['code']}_{sides}_{spec['drink']['code']}"
+
+
+def _line_from_picks(
+    code: str,
+    det: Dict[str, Any],
+    picks: Sequence[Tuple[Dict[str, Any], Dict[str, Any]]],
+    drink_codes: Sequence[str],
+    ice_key: str,
+) -> Tuple[Dict[str, Any], List[str]]:
+    order = {r["id"]: i for i, r in enumerate(rounds_of(det))}
+    ordered = sorted(picks, key=lambda p: order.get(p[0]["id"], 99))
+    drink_set = {str(c) for c in drink_codes if c}
+    round_list = []
+    name_bits = []
+    for rnd, ch in ordered:
+        iced = str(ch.get("code") or "") in drink_set
+        round_list.append(
+            {
+                "round": rnd["id"],
+                "comboItemList": [
+                    combo_item(
+                        ch["code"],
+                        ice_mod(ice_key) if iced else None,
+                        str(ch.get("name") or ""),
+                    )
+                ],
+            }
+        )
+        bit = str(ch.get("name") or ch.get("code") or "")
+        if iced:
+            bit += "去冰"
+        name_bits.append(bit)
+    product_name = str(det.get("name") or det.get("productName") or code)
+    return (
+        {
+            "productCode": code,
+            "productName": product_name,
+            "quantity": 1,
+            "roundList": round_list,
+        },
+        name_bits,
+    )
+
+
+def build_two_left_three(
+    code: str,
+    det: Dict[str, Any],
+    spec_a: Dict[str, Any],
+    spec_b: Dict[str, Any],
+    price_fen: int,
+    ice_key: str,
+) -> Dict[str, Any]:
+    """两份同一 left_three，各一条 line item。饮品槽都去冰，小食留在各自的小食轮。"""
+    def picks(spec: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        return (
+            [(spec["main_round"], spec["main"])]
+            + list(spec["side_picks"])
+            + [(spec["drink_round"], spec["drink"])]
+        )
+
+    drink_codes = [str(spec_a["drink"]["code"]), str(spec_b["drink"]["code"])]
+    side_codes = [
+        str(ch.get("code") or "")
+        for spec in (spec_a, spec_b)
+        for _, ch in spec["side_picks"]
+        if ch.get("code")
+    ]
+    item_a, bits_a = _line_from_picks(code, det, picks(spec_a), drink_codes, ice_key)
+    item_b, bits_b = _line_from_picks(code, det, picks(spec_b), drink_codes, ice_key)
+    product_name = item_a["productName"]
+    rk = f"t2{str(code)[-4:]}_{_spec_token(spec_a)}__{_spec_token(spec_b)}"
+    summary = (
+        f"{product_name}（{'+'.join(bits_a)}）+ "
+        f"{product_name}（{'+'.join(bits_b)}）≈¥{price_fen / 100:.1f}"
+    )
+    return {
+        "id": rk,
+        "rotationKey": rk,
+        "humanSummary": summary,
+        "listPriceFen": price_fen,
+        "priceVerified": False,
+        "tags": ["dual11", "two_left_three", "deal", "satiety", "built"],
+        "primaryMainCode": spec_a["main"]["code"],
+        "sideCodes": side_codes,
+        "drinkCodes": drink_codes,
+        "twoLeftThree": True,
+        "items": [item_a, item_b],
+    }
+
+
+def _expand_two_left_three(
+    legs: DualLegs,
+    details: Dict[str, Dict[str, Any]],
+    menu: Dict[str, Any],
+    prefer: Sequence[str],
+    ice_key: str,
+    budget_fen: Optional[int],
+    prefer_sides: Sequence[str],
+    remember,
+) -> None:
+    """同一 left_three 出两行。没有右腿时这是已核价过的 1+1；有右腿时与左×右并存。"""
+    for code in legs.left:
+        if legs.roles.get(code) != "left_three":
+            continue
+        det = details.get(code)
+        if not det:
+            continue
+        pair_base = price_for(code, menu) * 2
+        if budget_fen is not None and int(budget_fen) > 0 and pair_base > int(budget_fen):
+            continue
+        specs = _left_three_specs(det, prefer, prefer_sides, pair_base, budget_fen)
+        for i, j in _two_left_pair_indexes(len(specs), MAX_TWO_LEFT_PAIRS):
+            spec_a, spec_b = specs[i], specs[j]
+            parts = _spec_parts(spec_a) + _spec_parts(spec_b)
+            if not _within_budget(pair_base, parts, budget_fen):
+                continue
+            price = pair_base + sum(int(part.get("diffFen") or 0) for part in parts)
+            remember(
+                build_two_left_three(code, det, spec_a, spec_b, price, ice_key),
+                code,
+            )
+
+
 def expand_dual_1plus1(
     details: Dict[str, Dict[str, Any]],
     menu: Dict[str, Any],
     prefer: List[str],
     ice_key: str,
     budget_fen: Optional[int] = None,
+    prefer_sides: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """左腿（三件套/双吉）× 右腿（真有料）。腿来自菜单发现，不是写死的商品码。"""
+    """左腿 × 右腿，以及两份 left_three。腿来自菜单发现，不是写死的商品码。
+
+    真有右腿（当前名称或小食轮次）时仍出左×右。右腿为空但有 left_three 时，
+    出两行同一三件套左腿，例如两份 9900016651。left_burger 不会自己加倍。
+    """
     out: List[Dict[str, Any]] = []
     seen = set()
     legs = discover_dual_legs(menu, details)
-    if not legs.left or not legs.right:
-        return out
+    side_pref = [str(x) for x in (prefer_sides or [])]
 
     def remember(cand: Dict[str, Any], left_code: str) -> None:
         _keep_dual(cand, seen, out, left_code)
 
+    if legs.left and legs.right:
+        _expand_dual_left_right(legs, details, menu, prefer, ice_key, budget_fen, remember)
+    _expand_two_left_three(
+        legs,
+        details,
+        menu,
+        prefer,
+        ice_key,
+        budget_fen,
+        side_pref,
+        remember,
+    )
+    return out
+
+
+def _expand_dual_left_right(
+    legs: DualLegs,
+    details: Dict[str, Dict[str, Any]],
+    menu: Dict[str, Any],
+    prefer: List[str],
+    ice_key: str,
+    budget_fen: Optional[int],
+    remember,
+) -> None:
     for right_code in legs.right:
         zl = details.get(right_code)
         if not zl:
@@ -1542,7 +1830,6 @@ def expand_dual_1plus1(
                             cand["id"] = cand["rotationKey"]
                             cand["primaryMainCode"] = main_a["code"]
                             remember(cand, left_code)
-    return out
 
 
 def expand_dabao(
@@ -1626,6 +1913,7 @@ def discover_classic_three_codes(
     legs = discover_dual_legs(menu, details)
     known_other = set(_as_codes(FALLBACK_MCARD_FOUR_CODES))
     known_other |= set(_as_codes(FALLBACK_DUAL_LEFT)) | set(_as_codes(FALLBACK_DUAL_RIGHT))
+    known_other |= set(_as_codes(FORMER_DUAL_RIGHT_CODES))
     known_other |= set(_as_codes(FALLBACK_DABAO_CODES))
     known_other |= set(discover_mcard_four_codes(menu, details))
     known_other |= set(legs.left) | set(legs.right)
@@ -1820,7 +2108,16 @@ def expand(
             prefer_sides=prefer_sides,
         ))
     if "dual_1plus1" in fams:
-        add_all(expand_dual_1plus1(details, menu, prefer, ice_key, budget_fen=budget_fen))
+        add_all(
+            expand_dual_1plus1(
+                details,
+                menu,
+                prefer,
+                ice_key,
+                budget_fen=budget_fen,
+                prefer_sides=prefer_sides,
+            )
+        )
     if "dabao" in fams:
         add_all(expand_dabao(
             details, menu, prefer, ice_key, budget_fen=budget_fen, prefer_sides=prefer_sides
@@ -2077,6 +2374,39 @@ def tag_new_candidates(cands: List[Dict[str, Any]], menu: Dict[str, Any], prefs:
 
 
 
+def stale_right_leg_diagnostics(
+    menu: Dict[str, Any],
+    details: Optional[Dict[str, Dict[str, Any]]],
+    legs: DualLegs,
+) -> List[str]:
+    """旧右腿码现在被分成左腿、且当日没有右腿时，说明它改了名或轮次。
+
+    监控两类码：曾经配置过的右腿（FORMER_DUAL_RIGHT_CODES），以及仍写在
+    FALLBACK_DUAL_RIGHT 里的码。只在 legs.right 为空时发出，避免和真正的右腿配对混淆。
+    """
+    if legs.right:
+        return []
+    watched: List[str] = []
+    seen = set()
+    for code in list(_as_codes(FORMER_DUAL_RIGHT_CODES)) + list(_as_codes(FALLBACK_DUAL_RIGHT)):
+        if code and code not in seen:
+            seen.add(code)
+            watched.append(code)
+    present = _present_codes(menu, details)
+    found: List[str] = []
+    for code in watched:
+        if code not in present:
+            continue
+        detail = (details or {}).get(code)
+        role = legs.roles.get(code) or classify_dual_role(
+            _menu_product_name(menu, code, detail),
+            detail,
+        )
+        if role in ("left_three", "left_burger"):
+            found.append(f"stale_right_leg:{code}:classified_as_{role}:name_or_rounds_changed")
+    return found
+
+
 def explain_families(
     details: Dict[str, Dict[str, Any]],
     menu: Dict[str, Any],
@@ -2138,6 +2468,7 @@ def explain_families(
             row["pairs"] = pairs
             if not legs.left or not legs.right:
                 blockers.append("no_discovered_legs")
+            blockers.extend(stale_right_leg_diagnostics(menu, details, legs))
 
         elif family == "mcard_four":
             codes = discover_mcard_four_codes(menu, details)

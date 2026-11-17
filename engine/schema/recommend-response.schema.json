@@ -180,6 +180,10 @@
                       "code": {
                         "type": "string"
                       },
+                      "name": {
+                        "type": "string",
+                        "description": "轮次选项名。饱腹判断在商品码未登记时用来识别麦乐鸡等小食"
+                      },
                       "quantity": {
                         "type": "integer",
                         "minimum": 1

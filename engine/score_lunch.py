@@ -122,6 +122,7 @@ KNOWN_MAIN_CODES = {
 }
 KNOWN_SIDE_OR_CHICKEN = {
     "1401",  # 麦乐鸡5块 — 小食/鸡块，禁止当主食
+    "515106",  # 麦乐鸡4块 — 小食/鸡块，禁止当主食
     "505416",  # 琵琶腿（炸鸡小食，可作配，不作主堡）
     "521156",  # 那么大鸡排（同上）
     "4800",  # 小薯条
@@ -211,7 +212,7 @@ MCARD_FOUR_CODES = {
 DUAL11_PRODUCT_CODES = {
     "9900016655",  # 双吉随心配1+1
     "9900016651",  # 三件套随心配1+1
-    "9900016668",  # 真有料随心配1+1
+    "9900016668",  # 炸鸡随心配1+1（现为左腿；不再是真有料右腿）
 }
 COFFEE_CODES = {
     "507411",  # 冰美式
@@ -429,6 +430,25 @@ def _nugget_as_hero_main(cand: ScoredCandidate) -> Optional[str]:
     return None
 
 
+def _two_left_three_has_one_drink_each(cand: ScoredCandidate) -> bool:
+    """两份 left_three 各带一杯饮品。左×右仍只允许一杯，避免两边白区都点成饮料。"""
+    if "two_left_three" not in set(cand.tags or []):
+        return False
+    codes = [str(it.get("productCode") or "") for it in cand.items]
+    if len(codes) != 2 or not codes[0] or codes[0] != codes[1]:
+        return False
+    for it in cand.items:
+        drinks = 0
+        for rnd in it.get("roundList") or []:
+            for ci in rnd.get("comboItemList") or []:
+                code = str(ci.get("code") or "")
+                if classify_code(code) == "drink" or code in KNOWN_DRINK_CODES:
+                    drinks += 1
+        if drinks != 1:
+            return False
+    return True
+
+
 def hard_filter(
     cand: ScoredCandidate,
     req: Dict[str, Any],
@@ -476,7 +496,7 @@ def hard_filter(
                 return "forbid_thin_single_combo"
 
     drinks = drink_codes_in(cand)
-    if len(drinks) > 1:
+    if len(drinks) > 1 and not _two_left_three_has_one_drink_each(cand):
         return f"white_zone_drink_dup:{drinks}"
 
     # breakfast: coffee required by default
@@ -862,6 +882,7 @@ def coffee_hits(cand: ScoredCandidate) -> List[str]:
 
 _FAMILY_PREFIXES = (
     ("mk", "mcard_four"),
+    ("t2", "dual_1plus1"),  # two left_three lines; history has no tags
     ("sj", "dual_1plus1"),
     ("db", "dabao"),
     ("ct", "classic_three"),
@@ -1531,8 +1552,15 @@ def _default_mod_for_drink(drink_prefs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _combo_item(code: str, mod: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _combo_item(
+    code: str,
+    mod: Optional[Dict[str, Any]] = None,
+    name: str = "",
+) -> Dict[str, Any]:
     d: Dict[str, Any] = {"code": code, "quantity": 1}
+    label = str(name or "").strip()
+    if label:
+        d["name"] = label
     if mod:
         d["modification"] = mod
     return d
@@ -1668,22 +1696,29 @@ def enumerate_dual_11(req: Dict[str, Any]) -> Tuple[List[ScoredCandidate], List[
                 rl = [
                     {
                         "round": red["id"],
-                        "comboItemList": [_combo_item(red_choice["code"])],
+                        "comboItemList": [
+                            _combo_item(red_choice["code"], name=str(red_choice.get("name") or ""))
+                        ],
                     }
                 ]
                 for m in mid:
                     if m["choices"]:
+                        mid_choice = m["choices"][0]
                         rl.append(
                             {
                                 "round": m["id"],
-                                "comboItemList": [_combo_item(m["choices"][0]["code"])],
+                                "comboItemList": [
+                                    _combo_item(mid_choice["code"], name=str(mid_choice.get("name") or ""))
+                                ],
                             }
                         )
                 mod = _default_mod_for_drink(drink_prefs) if drink_mod else None
                 rl.append(
                     {
                         "round": white["id"],
-                        "comboItemList": [_combo_item(white_choice["code"], mod)],
+                        "comboItemList": [
+                            _combo_item(white_choice["code"], mod, str(white_choice.get("name") or ""))
+                        ],
                     }
                 )
                 return {

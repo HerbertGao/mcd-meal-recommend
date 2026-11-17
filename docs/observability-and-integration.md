@@ -31,10 +31,21 @@ with timer.stage("build-candidates"):
     ...
 with timer.stage("score"):
     ...
-with timer.stage("calculate-price"):
-    ...
+with timer.stage("calculate-price") as checkpoint:
+    response = call_mcp_calculate_price()
+    # 响应体里的 datetime 是接口盖章，不是工具返回时刻。
+    checkpoint["mark_mcp_returned"](response)
+    assemble_local_snapshots(response)
 timer.finish()
 ```
+
+`mark_mcp_returned(stage, response=...)` 也可以在阶段仍打开时直接调用。它只记下调用方时钟上的工具返回瞬间。上游 JSON 的 `datetime` 不会被解析，也不会写成 `mcpReturnedAt`。
+
+阶段结束时：
+
+- `durationSeconds`：阶段开始到 `stage_end` 的整段，和以前一样。
+- `rpcDurationSeconds`：阶段开始到 `mark_mcp_returned`。没有这次标记时不写。
+- `snapshotDurationSeconds`：工具返回之后到阶段结束，也就是本地快照组装。没有标记时不写。
 
 查看：
 
@@ -44,11 +55,15 @@ python3 engine/stage_timer.py summarize runs/timings/lunch-20261110.jsonl
 
 输出区分三类信息：
 
-- `stages[]`：**有起止**的阶段才有 `durationSeconds`。
+- `stages[]`：**有起止**的阶段才有 `durationSeconds`。调用方标记过工具返回时，同一条还会带 `rpcDurationSeconds` 和 `snapshotDurationSeconds`。
 - `missingEnd[]`：只有开始、没有结束的阶段，不给时长。
 - `unattributed[]`：相邻可观测时刻之间的间隔，标注 `no stage start/end inside this interval`。
 
-规则：没有起止证据的间隔不得记到菜单、详情或核价头上。仓库不输出"加速倍数"。
+规则：
+
+- 没有起止证据的间隔不得记到菜单、详情或核价头上。
+- 官方响应里的 `datetime` 是接口盖章，不是 MCP/工具调用返回的时刻。调用方必须自己标记工具返回，再把之后的快照组装分开计时。
+- 仓库不输出加速倍数。没有两次可对照的实测运行时，不要宣称变快了。
 
 ### 例程建议顺序（外部实现）
 
