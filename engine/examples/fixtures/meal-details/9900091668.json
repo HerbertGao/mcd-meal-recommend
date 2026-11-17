@@ -1,0 +1,37 @@
+{
+  "name": "真有料随心配1+1",
+  "roundList": [
+    {
+      "round": "1",
+      "name": "红区",
+      "comboItemList": [
+        {
+          "code": "505416",
+          "productName": "脆汁鸡琵琶腿",
+          "diffPrice": "+¥0.00"
+        },
+        {
+          "code": "1401",
+          "productName": "麦乐鸡5块",
+          "diffPrice": "+¥0.00"
+        }
+      ]
+    },
+    {
+      "round": "2",
+      "name": "白区",
+      "comboItemList": [
+        {
+          "code": "4105",
+          "productName": "菠萝派",
+          "diffPrice": "+¥0.00"
+        },
+        {
+          "code": "4106",
+          "productName": "香芋派",
+          "diffPrice": "+¥0.00"
+        }
+      ]
+    }
+  ]
+}

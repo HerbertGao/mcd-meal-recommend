@@ -1,34 +1,39 @@
 {
-  "name": "真有料随心配1+1",
-  "roundList": [
+  "name": "炸鸡随心配1+1",
+  "rounds": [
     {
-      "round": "1",
+      "id": "1",
       "name": "红区",
-      "comboItemList": [
+      "choices": [
         {
-          "code": "505416",
-          "productName": "脆汁鸡琵琶腿",
+          "code": "1120",
+          "name": "双层吉士汉堡",
           "diffPrice": "+¥0.00"
         },
         {
-          "code": "1401",
-          "productName": "麦乐鸡5块",
+          "code": "521147",
+          "name": "麦辣鸡排堡",
           "diffPrice": "+¥0.00"
         }
       ]
     },
     {
-      "round": "2",
-      "name": "白区",
-      "comboItemList": [
+      "id": "2",
+      "name": "饮料",
+      "choices": [
         {
-          "code": "4105",
-          "productName": "菠萝派",
+          "code": "522021",
+          "name": "无糖可乐大杯",
           "diffPrice": "+¥0.00"
         },
         {
-          "code": "4106",
-          "productName": "香芋派",
+          "code": "3050",
+          "name": "雪碧中杯",
+          "diffPrice": "+¥0.00"
+        },
+        {
+          "code": "4105",
+          "name": "菠萝派",
           "diffPrice": "+¥0.00"
         }
       ]

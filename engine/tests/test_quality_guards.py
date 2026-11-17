@@ -894,14 +894,14 @@ class CandidateFamilyExplanationTest(unittest.TestCase):
                     "meals": [
                         {"code": "9900016651", "name": "随心配1+1三件套!!!", "currentPrice": "21.90"},
                         {"code": "9900016655", "name": "双吉随心配1+1", "currentPrice": "13.90"},
-                        {"code": "9900016668", "name": "真有料随心配1+1", "currentPrice": "14.90"},
+                        {"code": "9900091668", "name": "真有料随心配1+1", "currentPrice": "14.90"},
                     ],
                 }
             ],
             "mealIndex": {
                 "9900016651": {"name": "随心配1+1三件套!!!", "currentPrice": "21.90"},
                 "9900016655": {"name": "双吉随心配1+1", "currentPrice": "13.90"},
-                "9900016668": {"name": "真有料随心配1+1", "currentPrice": "14.90"},
+                "9900091668": {"name": "真有料随心配1+1", "currentPrice": "14.90"},
             },
         }
 
@@ -927,7 +927,7 @@ class CandidateFamilyExplanationTest(unittest.TestCase):
     def test_declared_family_with_zero_yield_names_the_blocker(self):
         import build_candidates as bc
 
-        details = {"9900016651": self.detail_left_three(), "9900016668": self.detail_right()}
+        details = {"9900016651": self.detail_left_three(), "9900091668": self.detail_right()}
         cands = bc.expand_dual_1plus1(details, self.menu(), ["522021"], "0-0", budget_fen=3500)
         self.assertEqual(cands, [])
         diag = bc.explain_families(details, self.menu(), {}, ["dual_1plus1"], 3500, cands)
@@ -939,10 +939,10 @@ class CandidateFamilyExplanationTest(unittest.TestCase):
     def test_budget_blocker_reports_the_amount(self):
         import build_candidates as bc
 
-        details = {"9900016651": self.detail_left_three(), "9900016668": self.detail_right()}
+        details = {"9900016651": self.detail_left_three(), "9900091668": self.detail_right()}
         diag = bc.explain_families(details, self.menu(), {}, ["dual_1plus1"], 3500, [])
         blockers = diag["dual_1plus1"]["blockers"]
-        self.assertTrue(any("over_budget:9900016651+9900016668=3680>3500" == item for item in blockers))
+        self.assertTrue(any("over_budget:9900016651+9900091668=3680>3500" == item for item in blockers))
 
     def test_family_with_candidates_is_not_flagged(self):
         import build_candidates as bc
@@ -955,13 +955,148 @@ class CandidateFamilyExplanationTest(unittest.TestCase):
                     {"id": "2", "name": "饮料", "choices": [{"code": "522021", "name": "无糖可乐大杯"}]},
                 ],
             },
-            "9900016668": self.detail_right(),
+            "9900091668": self.detail_right(),
         }
         cands = bc.expand_dual_1plus1(details, self.menu(), ["522021"], "0-0", budget_fen=3500)
         self.assertTrue(cands)
         diag = bc.explain_families(details, self.menu(), {}, ["dual_1plus1"], 3500, cands)
         self.assertGreater(diag["dual_1plus1"]["generated"], 0)
         self.assertTrue(diag["dual_1plus1"]["explained"])
+
+
+class McGoldSatietyTest(unittest.TestCase):
+    def test_four_piece_nuggets_are_not_missing_side(self):
+        self.assertIn("515106", score_lunch.KNOWN_SIDE_OR_CHICKEN)
+        nameless = cand(
+            rotation_key="mk0884_1100_515106_3050",
+            human_summary="四件套（巨无霸+麦乐鸡4块+雪碧）",
+            price_fen=2800,
+            items=items(product_code="9900000884", main="1100", side="515106", drink="3050"),
+            tags=["mcard_four", "four_piece"],
+        )
+        req = {
+            "budgetFen": 3500,
+            "dining": "eat-in",
+            "prefs": {"satiety": "high"},
+            "satiety": {
+                "requireMain": True,
+                "requireSideOrChicken": True,
+                "requireDrink": True,
+                "forbidDrinkOnlyCombo": True,
+            },
+        }
+        self.assertIsNone(score_lunch.hard_filter(nameless, req))
+
+        named_only = cand(
+            rotation_key="mk0884_1100_600515_3050",
+            human_summary="四件套",
+            price_fen=2800,
+            items=[
+                {
+                    "productCode": "9900000884",
+                    "quantity": 1,
+                    "roundList": [
+                        {"round": "1", "comboItemList": [{"code": "1100", "quantity": 1, "name": "巨无霸"}]},
+                        {
+                            "round": "2",
+                            "comboItemList": [{"code": "600515", "quantity": 1, "name": "麦乐鸡4块"}],
+                        },
+                        {"round": "3", "comboItemList": [{"code": "3050", "quantity": 1, "name": "雪碧中杯"}]},
+                    ],
+                }
+            ],
+            tags=["mcard_four", "four_piece"],
+        )
+        self.assertIsNone(score_lunch.hard_filter(named_only, req))
+        self.assertNotEqual(
+            score_lunch.hard_filter(
+                cand(
+                    rotation_key="mk0884_1100_600515_3050_noname",
+                    items=[
+                        {
+                            "productCode": "9900000884",
+                            "quantity": 1,
+                            "roundList": [
+                                {"round": "1", "comboItemList": [{"code": "1100", "quantity": 1}]},
+                                {"round": "2", "comboItemList": [{"code": "600515", "quantity": 1}]},
+                                {"round": "3", "comboItemList": [{"code": "3050", "quantity": 1}]},
+                            ],
+                        }
+                    ],
+                    tags=["mcard_four"],
+                ),
+                req,
+            ),
+            None,
+        )
+
+    def test_built_mcard_combo_names_515106_and_keeps_it(self):
+        import build_candidates as bc
+
+        menu = {
+            "categories": [
+                {"name": "麦金卡", "meals": [{"code": "9900000884", "name": "人气超值四件套", "currentPrice": "28"}]}
+            ],
+            "mealIndex": {"9900000884": {"name": "人气超值四件套", "currentPrice": "28"}},
+        }
+        detail = {
+            "name": "人气超值四件套",
+            "rounds": [
+                {"id": "1", "name": "主食", "choices": [{"code": "1100", "name": "巨无霸", "diffPrice": "+¥0.00"}]},
+                {"id": "2", "name": "小食", "choices": [{"code": "515106", "name": "麦乐鸡4块", "diffPrice": "+¥0.00"}]},
+                {"id": "3", "name": "饮料", "choices": [{"code": "3050", "name": "雪碧中杯", "diffPrice": "+¥0.00"}]},
+            ],
+        }
+        cands = bc.expand_mcard_four(
+            {"9900000884": detail},
+            menu,
+            ["3050"],
+            "0-0",
+            False,
+            budget_fen=3500,
+        )
+        self.assertTrue(cands)
+        named = []
+        for item in cands[0]["items"]:
+            for rnd in item["roundList"]:
+                for ci in rnd["comboItemList"]:
+                    if ci["code"] == "515106":
+                        named.append(ci.get("name"))
+        self.assertIn("麦乐鸡4块", named)
+        scored = score_lunch.ScoredCandidate(
+            rotation_key=cands[0]["rotationKey"],
+            human_summary=cands[0]["humanSummary"],
+            price_fen=cands[0]["listPriceFen"],
+            items=cands[0]["items"],
+            tags=cands[0]["tags"],
+        )
+        self.assertIsNone(
+            score_lunch.hard_filter(scored, {"budgetFen": 3500, "dining": "eat-in", "prefs": {"satiety": "high"}})
+        )
+
+    def test_two_drinks_still_fail_unless_two_left_three(self):
+        req = {"budgetFen": 5000, "dining": "eat-in", "prefs": {"satiety": "high"}}
+        doubled = [
+            items(product_code="9900016651", main="1120", side="4810", drink="522021")[0],
+            items(product_code="9900016651", main="1450", side="4800", drink="3050")[0],
+        ]
+        allowed = cand(
+            rotation_key="t26651",
+            price_fen=2980,
+            items=doubled,
+            tags=["dual11", "two_left_three"],
+        )
+        self.assertIsNone(score_lunch.hard_filter(allowed, req))
+        rejected = cand(
+            rotation_key="sj_two_drinks",
+            price_fen=2880,
+            items=doubled,
+            tags=["dual11"],
+        )
+        self.assertEqual(
+            score_lunch.hard_filter(rejected, req),
+            "white_zone_drink_dup:['522021', '3050']",
+        )
 
 
 class SummaryRenderingTest(unittest.TestCase):
