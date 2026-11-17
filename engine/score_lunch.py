@@ -882,6 +882,7 @@ def coffee_hits(cand: ScoredCandidate) -> List[str]:
 
 _FAMILY_PREFIXES = (
     ("mk", "mcard_four"),
+    ("t2", "dual_1plus1"),  # two left_three lines; history has no tags
     ("sj", "dual_1plus1"),
     ("db", "dabao"),
     ("ct", "classic_three"),
