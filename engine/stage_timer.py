@@ -10,8 +10,11 @@ Typical caller usage (the routine itself is not changed by this repo)::
     from engine.stage_timer import StageTimer
     t = StageTimer("runs/timings/lunch-20261110.jsonl", run_label="lunch")
     t.mark_dependency("mcp-wrapper", present=True)
-    with t.stage("query-meals"):
-        ...
+    with t.stage("calculate-price") as checkpoint:
+        response = call_mcp()
+        # response["datetime"] is an API stamp, not the tool-return clock.
+        checkpoint["mark_mcp_returned"](response)
+        assemble_snapshots(response)
     t.finish()
 
 CLI (manual instrumentation / inspection only)::
@@ -53,16 +56,41 @@ def _iso(moment: datetime) -> str:
 
 
 @dataclass
+class _OpenStage:
+    name: str
+    started_mono: float
+    mcp_returned_mono: Optional[float] = None
+    mcp_returned_wall: Optional[datetime] = None
+
+
+@dataclass
 class StageTimer:
     path: Optional[str] = None
     run_label: str = ""
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     clock: Any = time.monotonic
+    now: Any = None
     events: List[Dict[str, Any]] = field(default_factory=list)
     _started_at: Optional[float] = None
+    _open: List[_OpenStage] = field(default_factory=list)
+
+    def _wall_now(self) -> datetime:
+        if self.now is None:
+            return _now()
+        moment = self.now() if callable(self.now) else self.now
+        if not isinstance(moment, datetime):
+            return _now()
+        if moment.tzinfo is None:
+            return moment.replace(tzinfo=CST)
+        return moment
 
     def _emit(self, record: Mapping[str, Any]) -> None:
-        row = {"runId": self.run_id, "runLabel": self.run_label, **_now_iso_row(), **dict(record)}
+        row = {
+            "runId": self.run_id,
+            "runLabel": self.run_label,
+            "loggedAt": _iso(self._wall_now()),
+            **dict(record),
+        }
         self.events.append(row)
         if self.path:
             p = Path(self.path)
@@ -82,18 +110,59 @@ class StageTimer:
                 "name": str(name),
                 "present": bool(present),
                 "detail": str(detail or ""),
-                "observedAt": recorded_at or _iso(_now()),
+                "observedAt": recorded_at or _iso(self._wall_now()),
             }
         )
 
     def note(self, message: str, **extra: Any) -> None:
         self._emit({"event": EVENT_NOTE, "message": str(message), **extra})
 
+    def mark_mcp_returned(self, stage: Optional[str] = None, response: Any = None) -> None:
+        """Record the monotonic instant an in-flight MCP/tool call returned.
+
+        Call this while ``stage`` is still open, before snapshot assembly.
+        ``response`` may be the upstream JSON so the caller can pass it through.
+        A ``datetime`` field on that JSON is an API stamp and is not a clock:
+        it is never parsed and never becomes ``mcpReturnedAt`` or a duration.
+        The first mark for an open stage wins.
+        """
+        if isinstance(response, Mapping) and "datetime" in response:
+            # Accepted and discarded. Do not parse, do not store.
+            pass
+        target = str(stage or "")
+        slot: Optional[_OpenStage] = None
+        if target:
+            for item in reversed(self._open):
+                if item.name == target:
+                    slot = item
+                    break
+        elif self._open:
+            slot = self._open[-1]
+        if slot is None or slot.mcp_returned_mono is not None:
+            return
+        slot.mcp_returned_mono = float(self.clock())
+        slot.mcp_returned_wall = self._wall_now()
+
     @contextmanager
     def stage(self, name: str, **extra: Any) -> Iterator[Dict[str, Any]]:
-        started = self.clock()
-        self._emit({"event": EVENT_START, "stage": str(name), "startedAt": _iso(_now()), **extra})
+        started = float(self.clock())
+        stage_name = str(name)
+        slot = _OpenStage(name=stage_name, started_mono=started)
+        self._open.append(slot)
+        self._emit(
+            {
+                "event": EVENT_START,
+                "stage": stage_name,
+                "startedAt": _iso(self._wall_now()),
+                **extra,
+            }
+        )
         info: Dict[str, Any] = {}
+
+        def mark_mcp_returned(response: Any = None) -> None:
+            self.mark_mcp_returned(stage_name, response=response)
+
+        info["mark_mcp_returned"] = mark_mcp_returned
         status = "ok"
         try:
             yield info
@@ -101,26 +170,29 @@ class StageTimer:
             status = f"error:{type(exc).__name__}"
             raise
         finally:
-            ended = self.clock()
-            self._emit(
-                {
-                    "event": EVENT_END,
-                    "stage": str(name),
-                    "endedAt": _iso(_now()),
-                    "durationSeconds": round(max(0.0, ended - started), 3),
-                    "status": status,
-                    **({"detail": info.get("detail")} if info.get("detail") else {}),
-                }
-            )
+            ended = float(self.clock())
+            if slot in self._open:
+                self._open.remove(slot)
+            record: Dict[str, Any] = {
+                "event": EVENT_END,
+                "stage": stage_name,
+                "endedAt": _iso(self._wall_now()),
+                "durationSeconds": round(max(0.0, ended - started), 3),
+                "status": status,
+            }
+            if slot.mcp_returned_mono is not None:
+                record["rpcDurationSeconds"] = round(max(0.0, slot.mcp_returned_mono - started), 3)
+                record["snapshotDurationSeconds"] = round(max(0.0, ended - slot.mcp_returned_mono), 3)
+                if slot.mcp_returned_wall is not None:
+                    record["mcpReturnedAt"] = _iso(slot.mcp_returned_wall)
+            if info.get("detail"):
+                record["detail"] = info.get("detail")
+            self._emit(record)
 
     def finish(self, *, status: str = "ok") -> Dict[str, Any]:
         summary = summarize_events(self.events)
         self._emit({"event": "run_end", "status": status, "wallSeconds": summary.get("wallSeconds")})
         return summary
-
-
-def _now_iso_row() -> Dict[str, str]:
-    return {"loggedAt": _iso(_now())}
 
 
 def load_events(path: str) -> List[Dict[str, Any]]:
@@ -181,15 +253,19 @@ def summarize_events(
             started = starts.pop(stage, None)
             if moment is not None:
                 timeline.append({"at": moment, "kind": "end", "stage": stage})
-            stages.append(
-                {
-                    "stage": stage,
-                    "startedAt": _iso(started) if started else None,
-                    "endedAt": _iso(moment) if moment else None,
-                    "durationSeconds": row.get("durationSeconds"),
-                    "status": row.get("status") or "ok",
-                }
-            )
+            stage_row: Dict[str, Any] = {
+                "stage": stage,
+                "startedAt": _iso(started) if started else None,
+                "endedAt": _iso(moment) if moment else None,
+                "durationSeconds": row.get("durationSeconds"),
+                "status": row.get("status") or "ok",
+            }
+            # Split fields come only from an explicit tool-return mark.
+            # An upstream ``datetime`` stamp on the same row is not a clock.
+            for key in ("rpcDurationSeconds", "snapshotDurationSeconds", "mcpReturnedAt"):
+                if key in row and row.get(key) is not None:
+                    stage_row[key] = row.get(key)
+            stages.append(stage_row)
         elif event == EVENT_DEPENDENCY:
             dependencies.append(
                 {

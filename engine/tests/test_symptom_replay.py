@@ -300,6 +300,92 @@ class StageTimerTest(unittest.TestCase):
         self.assertEqual(gap[0]["from"], "2026-11-10T12:00:10+08:00")
         self.assertEqual(gap[0]["to"], "2026-11-10T12:05:00+08:00")
 
+    def test_mcp_return_splits_rpc_and_snapshot_durations(self):
+        clock = {"mono": 0.0}
+
+        def monotonic():
+            return clock["mono"]
+
+        timer = stage_timer.StageTimer(clock=monotonic)
+        with timer.stage("calculate-price") as checkpoint:
+            clock["mono"] = 7.0
+            checkpoint["mark_mcp_returned"]()
+            clock["mono"] = 81.0
+        end = [row for row in timer.events if row["event"] == "stage_end"][0]
+        self.assertEqual(end["durationSeconds"], 81.0)
+        self.assertEqual(end["rpcDurationSeconds"], 7.0)
+        self.assertEqual(end["snapshotDurationSeconds"], 74.0)
+        summary = stage_timer.summarize_events(timer.events)
+        stage = summary["stages"][0]
+        self.assertEqual(stage["durationSeconds"], 81.0)
+        self.assertEqual(stage["rpcDurationSeconds"], 7.0)
+        self.assertEqual(stage["snapshotDurationSeconds"], 74.0)
+
+    def test_upstream_datetime_is_not_a_duration_source(self):
+        clock = {"mono": 0.0}
+        wall = {"at": datetime(2026, 11, 17, 12, 8, 44, tzinfo=CST)}
+
+        def monotonic():
+            return clock["mono"]
+
+        def now():
+            return wall["at"]
+
+        api_stamp = "2019-01-01 00:00:00"
+        payload = {"datetime": api_stamp, "price": 1}
+        timer = stage_timer.StageTimer(clock=monotonic, now=now)
+        with timer.stage("calculate-price"):
+            clock["mono"] = 7.0
+            wall["at"] = datetime(2026, 11, 17, 12, 9, 0, tzinfo=CST)
+            timer.mark_mcp_returned("calculate-price", response=payload)
+            # A later mark, and the API stamp, must not move the return instant.
+            clock["mono"] = 40.0
+            timer.mark_mcp_returned(response={"datetime": "2026-11-17 12:08:51"})
+            clock["mono"] = 80.687
+        end = [row for row in timer.events if row["event"] == "stage_end"][0]
+        self.assertEqual(end["durationSeconds"], 80.687)
+        self.assertEqual(end["rpcDurationSeconds"], 7.0)
+        self.assertEqual(end["snapshotDurationSeconds"], 73.687)
+        self.assertEqual(end["mcpReturnedAt"], "2026-11-17T12:09:00+08:00")
+        blob = json.dumps(end, ensure_ascii=False)
+        self.assertNotIn(api_stamp, blob)
+        self.assertNotIn("12:08:51", blob)
+
+        decoy = [
+            {
+                "event": "stage_start",
+                "stage": "calculate-price",
+                "startedAt": "2026-11-17T12:08:44+08:00",
+            },
+            {
+                "event": "stage_end",
+                "stage": "calculate-price",
+                "endedAt": "2026-11-17T12:10:05+08:00",
+                "durationSeconds": 80.687,
+                "rpcDurationSeconds": 7.0,
+                "snapshotDurationSeconds": 73.687,
+                "datetime": "2026-11-17 12:08:51",
+            },
+        ]
+        row = stage_timer.summarize_events(decoy)["stages"][0]
+        self.assertEqual(row["durationSeconds"], 80.687)
+        self.assertEqual(row["rpcDurationSeconds"], 7.0)
+        self.assertEqual(row["snapshotDurationSeconds"], 73.687)
+        self.assertNotIn("datetime", row)
+        self.assertNotIn("mcpReturnedAt", row)
+
+    def test_unmarked_stage_keeps_only_full_duration(self):
+        clock = {"mono": 0.0}
+        timer = stage_timer.StageTimer(clock=lambda: clock["mono"])
+        with timer.stage("calculate-price"):
+            clock["mono"] = 80.687
+        end = [row for row in timer.events if row["event"] == "stage_end"][0]
+        self.assertEqual(end["durationSeconds"], 80.687)
+        self.assertNotIn("rpcDurationSeconds", end)
+        self.assertNotIn("snapshotDurationSeconds", end)
+        timer.mark_mcp_returned("calculate-price", response={"datetime": "2026-11-17 12:08:51"})
+        self.assertEqual(len([row for row in timer.events if row["event"] == "stage_end"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
