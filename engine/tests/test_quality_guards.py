@@ -448,8 +448,13 @@ class CacheIsolationTest(unittest.TestCase):
             self.assertEqual(cache.get(failed, now=later).reason, "previous_error")
 
 
+def _recent_day(days_ago: int = 1) -> str:
+    return (datetime.now(CST).date() - timedelta(days=days_ago)).isoformat()
+
+
 class ExposureTrackTest(unittest.TestCase):
-    def event(self, kind, rk="db6671_515295_4810_3060", day="2026-11-09", seq=0):
+    def event(self, kind, rk="db6671_515295_4810_3060", day: str | None = None, seq=0):
+        day = day or _recent_day(1)
         return {
             "kind": kind,
             "rotationKey": rk,

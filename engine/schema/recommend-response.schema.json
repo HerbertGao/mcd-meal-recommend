@@ -350,6 +350,17 @@
     },
     "exposurePenaltyReason": {
       "type": "string"
+    },
+    "presented": {
+      "type": "array",
+      "description": "Multi-set noon presentation (build-score-calc / merge-quotes); each entry is a RecommendResponse-shaped row",
+      "items": {
+        "type": "object"
+      }
+    },
+    "presentLabel": {
+      "type": "string",
+      "description": "A/B/C label for parallel calculate-price"
     }
   },
   "allOf": [

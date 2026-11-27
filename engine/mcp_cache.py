@@ -87,6 +87,46 @@ def fingerprint(payload: Any) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
+MENU_VOLATILE_KEYS = frozenset(
+    {
+        "fetchedAt",
+        "apiDatetime",
+        "datetime",
+        "traceId",
+        "writtenAt",
+        "expiresAt",
+        "payloadFingerprint",
+        "source",
+        "success",
+        "message",
+        "error",
+    }
+)
+
+
+def _strip_volatile(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key) in MENU_VOLATILE_KEYS:
+                continue
+            out[str(key)] = _strip_volatile(item)
+        return out
+    if isinstance(value, list):
+        return [_strip_volatile(item) for item in value]
+    return value
+
+
+def stable_menu_document(menu: Any) -> Any:
+    """Menu payload with envelope timestamps removed for content comparison."""
+    return _strip_volatile(menu)
+
+
+def stable_menu_fingerprint(menu: Any) -> str:
+    """Stable content hash for noon prewarm reuse (ignores fetchedAt/traceId/etc.)."""
+    return fingerprint(stable_menu_document(menu))
+
+
 @dataclass(frozen=True)
 class CacheKey:
     kind: str
@@ -434,7 +474,11 @@ def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Inspect or edit the offline MCP snapshot cache (never calls MCP, never prices an order)"
     )
-    ap.add_argument("--root", default="engine/runs/cache", help="cache root (gitignored)")
+    ap.add_argument(
+        "--root",
+        required=True,
+        help="cache root (required; no default — flat runtime must pass explicitly)",
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_key_args(parser: argparse.ArgumentParser) -> None:

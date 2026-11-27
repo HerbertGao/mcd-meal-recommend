@@ -53,6 +53,18 @@ timer.finish()
 python3 engine/stage_timer.py summarize runs/timings/lunch-20261110.jsonl
 ```
 
+无 Python 嵌入时，可用 CLI（例程第一步）：
+
+```bash
+python3 engine/stage_timer.py run_start --log runs/timings/lunch.jsonl --label lunch --wrapper /path/to/mcp-wrapper
+python3 engine/stage_timer.py stage-start --log runs/timings/lunch.jsonl query-meals
+python3 engine/stage_timer.py mark-mcp-returned --log runs/timings/lunch.jsonl --response runs/raw/query-meals.json
+python3 engine/stage_timer.py stage-end --log runs/timings/lunch.jsonl query-meals
+python3 engine/stage_timer.py finish --log runs/timings/lunch.jsonl
+```
+
+`mark-mcp-returned` 只记录调用方时钟；响应里的 `datetime` 不会当作 MCP 返回时刻。
+
 输出区分三类信息：
 
 - `stages[]`：**有起止**的阶段才有 `durationSeconds`。调用方标记过工具返回时，同一条还会带 `rpcDurationSeconds` 和 `snapshotDurationSeconds`。
@@ -107,7 +119,17 @@ python3 engine/mcp_cache.py stats
 python3 engine/mcp_cache.py prune
 ```
 
-`menuFingerprint` 由调用方对菜单 payload 取 `mcp_cache.fingerprint(menu)`，并且是详情缓存键的一部分。缺省指纹会被拒绝，不能当成通配。两份菜单的详情落在不同目录，读取另一份菜单得到 `missing`，不会返回上一份详情；若文件里的指纹与查找键不一致，结果是 `context_changed`。
+**稳定菜单指纹**：午间复用与详情键绑定使用 `mcp_cache.stable_menu_fingerprint(menu)`（剥离 `fetchedAt` / `apiDatetime` / `traceId` 等信封字段）。`mcp_cache.fingerprint` 仍用于单条缓存条目的 payload 完整性校验；不要把带时间戳的整包 slim 直接当午间命中依据。
+
+`menuFingerprint` 是详情缓存键的一部分。缺省指纹会被拒绝，不能当成通配。两份菜单的详情落在不同目录，读取另一份菜单得到 `missing`，不会返回上一份详情；若文件里的指纹与查找键不一致，结果是 `context_changed`。
+
+`mcp_cache.py` CLI 的 `--root` **必填**（无默认 `engine/runs/cache`，flat runtime 必须显式传入根目录）。
+
+菜单 TTL 默认 900s、详情 86400s（绑定稳定指纹）。**午间仍必须 live `query-meals`**（`reservationDate=""`），不得因 TTL 未过期而跳过；预热缓存只减少详情补拉。
+
+预热目录建议隔离，例如 `runs/cache/prewarm/YYYY-MM-DD` 与 `runs/prewarm/YYYY-MM-DD/manifest.json`。失败 tombstone 不得污染主缓存。可选 `ingest-menu --expires-at` 仅作文档标记，不能作为跳过午间 `query-meals` 的理由。
+
+预约键 `reservationDate="YYYY-MM-DD 12:00"` 与即时堂食键 `reservationDate=""` 隔离；确认内容为午餐菜单后，用 `recommend_run.py promote` 复制到即时键（见下文）。
 
 损坏的 `entry.json`、payload 指纹不符、损坏的 tombstone 都不是命中。`prune` 会删除损坏条目和过期超过保留窗口的条目，**不会**删除 tombstone；失败标记要到下一次成功 `put` 才清除。
 
@@ -168,7 +190,24 @@ python3 engine/exposure_log.py --file runs/history/exposure-lunch.json summary -
 
 这些只是诊断，不会为了凑数把商品塞进候选池。
 
-## 8. 仍未覆盖
+## 8. 午餐脚本化流水线（`engine/recommend_run.py`）
+
+不调用 MCP；只消费 `CallDynamicTool(..., write_to_file=true)` 写下的 JSON。`--cache-root` / `--root` 必填。
+
+| 子命令 | 作用 |
+|---|---|
+| `ingest-menu` |  unwrap 信封 → slim → `stable_menu_fingerprint` → `needed-details.json` + manifest → `mcp_cache put` |
+| `ingest-details` | 按稳定指纹写入详情缓存；SKU 来自当日菜单 `discover_*`，硬编码仅退路 |
+| `check-menu` | 午间 live 菜单与预热指纹比对：0=可复用，1=缺详情需补拉，2=预热不可用（全量 fallback） |
+| `build-score-calc` | build → score → `presented[]`（`presentCount` 默认 3，A=rank_only 第一，B/C 来自 diversify 池）→ `calc-requests/{A,B,C}.json` |
+| `merge-quotes` | 以 `calculate-price` 为唯一价源，经 `combo_edit.sync_snapshots` 合并三份快照 |
+| `promote` | 午餐内容确认后，从预约 `reservationDate` 缓存复制 menu+details 到 `reservationDate=""` |
+
+曝光写入不在 build/score 内完成；例程在用户看到菜单后再记 exposure。
+
+价不得预热：预热只含菜单/详情；`calculate-price` 仍在午间 live 调用，每个 `presented` 各一次。
+
+## 9. 仍未覆盖
 
 - wrapper 缺失与恢复耗时：仓库不可见，只能由例程用 `mark_dependency` + `note` 记录。
 - 调度排队、交接延迟：外部。

@@ -24,6 +24,12 @@ import stage_timer  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
 
+
+def recent_iso(days_ago: int = 1) -> str:
+    moment = datetime.now(CST) - timedelta(days=days_ago)
+    return moment.replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+
+
 # 2026-11-10 lunch: rank1 combo shown but not accepted. Same combo had been
 # offered the day before (transcript-only), so deal history alone cannot see it.
 ROTATION_KEY = "db6671_515295_4810_3060"
@@ -106,12 +112,13 @@ class TodaysScoreRegressionTest(unittest.TestCase):
             score=50.19,
             tags=["dabao"],
         )
+        recent = recent_iso(days_ago=1)[:10]
         events = [
             {
                 "kind": "exposure",
                 "rotationKey": ROTATION_KEY,
-                "at": "2026-11-09T12:21:00+08:00",
-                "date": "2026-11-09",
+                "at": recent_iso(days_ago=1),
+                "date": recent,
                 "storeCode": "000000",
                 "dining": "eat-in",
                 "mealPeriod": "lunch",

@@ -58,6 +58,7 @@
   "selection": {
     "mode": "rank_only",
     "topK": 5,
+    "presentCount": 3,
     "random": "uniform",
     "diversifyByMain": true,
     "maxPerMainInTopK": 1,
