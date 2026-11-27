@@ -41,6 +41,7 @@ EVENT_START = "stage_start"
 EVENT_END = "stage_end"
 EVENT_DEPENDENCY = "dependency"
 EVENT_NOTE = "note"
+EVENT_RUN_START = "run_start"
 
 # A stage whose neighbours are more than this far apart is reported as a gap
 # rather than folded into the next stage.
@@ -313,12 +314,186 @@ def summarize_events(
     }
 
 
+def _state_path(log_path: str) -> Path:
+    p = Path(log_path)
+    return p.parent / f"{p.stem}.stage-state.json"
+
+
+def _load_state(log_path: str) -> Dict[str, Any]:
+    path = _state_path(log_path)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_state(log_path: str, state: Dict[str, Any]) -> None:
+    path = _state_path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _timer_from_state(log_path: str) -> StageTimer:
+    state = _load_state(log_path)
+    run_id = str(state.get("runId") or uuid.uuid4().hex[:12])
+    return StageTimer(path=log_path, run_label=str(state.get("runLabel") or ""), run_id=run_id)
+
+
+def cmd_run_start(log_path: str, label: str, wrapper: str) -> int:
+    present = Path(wrapper).exists()
+    timer = StageTimer(path=log_path, run_label=label)
+    timer.mark_dependency("mcp-wrapper", present=present, detail="stat only")
+    timer._emit({"event": EVENT_RUN_START, "startedAt": _iso(timer._wall_now())})
+    _save_state(
+        log_path,
+        {
+            "runId": timer.run_id,
+            "runLabel": label,
+            "openStages": [],
+        },
+    )
+    print(timer.run_id)
+    return 0
+
+
+def cmd_stage_start(log_path: str, stage: str) -> int:
+    state = _load_state(log_path)
+    if not state.get("runId"):
+        print("run not started: call run_start first", file=sys.stderr)
+        return 2
+    timer = _timer_from_state(log_path)
+    started_mono = float(timer.clock())
+    timer._emit(
+        {
+            "event": EVENT_START,
+            "stage": str(stage),
+            "startedAt": _iso(timer._wall_now()),
+        }
+    )
+    open_stages = list(state.get("openStages") or [])
+    open_stages.append({"name": stage, "startedMono": started_mono, "mcpReturnedMono": None})
+    state["openStages"] = open_stages
+    _save_state(log_path, state)
+    return 0
+
+
+def cmd_mark_mcp_returned(log_path: str, response_path: Optional[str], stage: Optional[str]) -> int:
+    state = _load_state(log_path)
+    open_stages = list(state.get("openStages") or [])
+    if not open_stages:
+        print("no open stage", file=sys.stderr)
+        return 2
+    timer = _timer_from_state(log_path)
+    if response_path:
+        try:
+            response = json.loads(Path(response_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"response error: {exc}", file=sys.stderr)
+            return 2
+    else:
+        response = None
+    target = str(stage or "")
+    slot = None
+    if target:
+        for item in reversed(open_stages):
+            if item.get("name") == target:
+                slot = item
+                break
+    else:
+        slot = open_stages[-1]
+    if slot is None:
+        print("stage not open", file=sys.stderr)
+        return 2
+    if slot.get("mcpReturnedMono") is not None:
+        return 0
+    slot["mcpReturnedMono"] = float(timer.clock())
+    slot["mcpReturnedAt"] = _iso(timer._wall_now())
+    state["openStages"] = open_stages
+    _save_state(log_path, state)
+    # response accepted; upstream datetime is never used as the return clock
+    if isinstance(response, Mapping):
+        pass
+    return 0
+
+
+def cmd_stage_end(log_path: str, stage: str, status: str = "ok") -> int:
+    state = _load_state(log_path)
+    open_stages = list(state.get("openStages") or [])
+    timer = _timer_from_state(log_path)
+    idx = None
+    for i, item in enumerate(reversed(open_stages)):
+        if item.get("name") == stage:
+            idx = len(open_stages) - 1 - i
+            break
+    if idx is None:
+        print("stage not open", file=sys.stderr)
+        return 2
+    slot = open_stages.pop(idx)
+    ended_mono = float(timer.clock())
+    started_mono = float(slot.get("startedMono") or ended_mono)
+    record: Dict[str, Any] = {
+        "event": EVENT_END,
+        "stage": stage,
+        "endedAt": _iso(timer._wall_now()),
+        "durationSeconds": round(max(0.0, ended_mono - started_mono), 3),
+        "status": status,
+    }
+    mcp_mono = slot.get("mcpReturnedMono")
+    if mcp_mono is not None:
+        record["rpcDurationSeconds"] = round(max(0.0, float(mcp_mono) - started_mono), 3)
+        record["snapshotDurationSeconds"] = round(max(0.0, ended_mono - float(mcp_mono)), 3)
+        if slot.get("mcpReturnedAt"):
+            record["mcpReturnedAt"] = slot["mcpReturnedAt"]
+    timer._emit(record)
+    state["openStages"] = open_stages
+    _save_state(log_path, state)
+    return 0
+
+
+def cmd_finish(log_path: str, status: str = "ok") -> int:
+    timer = _timer_from_state(log_path)
+    timer.events = load_events(log_path)
+    summary = timer.finish(status=status)
+    state = _load_state(log_path)
+    state["openStages"] = []
+    _save_state(log_path, state)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="Inspect a stage-timing JSONL log (offline; never calls MCP)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sm = sub.add_parser("summarize", help="print per-stage durations and unattributed gaps")
     sm.add_argument("path")
     sm.add_argument("--gap-seconds", type=float, default=DEFAULT_GAP_SECONDS)
+
+    rs = sub.add_parser("run_start", help="first routine step: dependency + run_start")
+    rs.add_argument("--log", required=True)
+    rs.add_argument("--label", default="lunch")
+    rs.add_argument("--wrapper", required=True, help="path to MCP wrapper; stat existence only")
+
+    ss = sub.add_parser("stage-start", help="open a named stage")
+    ss.add_argument("--log", required=True)
+    ss.add_argument("stage_name", help="stage name")
+
+    mm = sub.add_parser("mark-mcp-returned", help="record tool return instant (not upstream datetime)")
+    mm.add_argument("--log", required=True)
+    mm.add_argument("--response", default="", help="optional MCP JSON file (datetime ignored)")
+    mm.add_argument("--stage", default="")
+
+    se = sub.add_parser("stage-end", help="close a named stage")
+    se.add_argument("--log", required=True)
+    se.add_argument("stage_name", help="stage name")
+    se.add_argument("--status", default="ok")
+
+    fin = sub.add_parser("finish", help="emit run_end + summary")
+    fin.add_argument("--log", required=True)
+    fin.add_argument("--status", default="ok")
+
     args = ap.parse_args(argv)
     if args.cmd == "summarize":
         events = load_events(args.path)
@@ -327,6 +502,16 @@ def main(argv: Optional[list] = None) -> int:
             return 1
         print(json.dumps(summarize_events(events, gap_seconds=args.gap_seconds), ensure_ascii=False, indent=2))
         return 0
+    if args.cmd == "run_start":
+        return cmd_run_start(args.log, args.label, args.wrapper)
+    if args.cmd == "stage-start":
+        return cmd_stage_start(args.log, str(args.stage_name))
+    if args.cmd == "mark-mcp-returned":
+        return cmd_mark_mcp_returned(args.log, args.response or None, args.stage or None)
+    if args.cmd == "stage-end":
+        return cmd_stage_end(args.log, str(args.stage_name), status=args.status)
+    if args.cmd == "finish":
+        return cmd_finish(args.log, status=args.status)
     return 2
 
 

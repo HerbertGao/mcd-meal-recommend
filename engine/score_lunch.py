@@ -1830,21 +1830,18 @@ def interleave_by_main_code(
     return out
 
 
-def select_from_ranked(
+def diversification_pool(
     ranked: List[ScoredCandidate],
     req: Dict[str, Any],
     rng: random.Random,
-) -> Tuple[ScoredCandidate, List[ScoredCandidate], str]:
+) -> List[ScoredCandidate]:
+    """Top-K pool after diversifyByMain / diversifyByFamily (same logic as selection)."""
     sel = req.get("selection") or {}
-    mode = str(sel.get("mode") or "rank_then_random")
     top_k = int(sel.get("topK") or 5)
-    random_mode = str(sel.get("random") or "uniform")
-    # diversifyByMain: at most one seat per primaryMainCode inside Top-K
     diversify = sel.get("diversifyByMain")
     if diversify is None:
         diversify = True
     per_main = int(sel.get("maxPerMainInTopK") or 1)
-    # diversifyByFamily: round-robin families so mcard/dual/coffee share Top-K
     diversify_fam = sel.get("diversifyByFamily")
     if diversify_fam is None:
         pri = effective_priority(req)
@@ -1865,7 +1862,6 @@ def select_from_ranked(
         return pool or seq[: max(1, top_k)]
 
     if diversify_fam:
-        # bucket by family preserving score order, then round-robin
         buckets: Dict[str, List[ScoredCandidate]] = {}
         order: List[str] = []
         for c in ranked:
@@ -1874,13 +1870,16 @@ def select_from_ranked(
                 buckets[fam] = []
                 order.append(fam)
             buckets[fam].append(c)
-        # within each family, interleave by main so 鳕鱼/不素可同时进 Top-K
         for fam in list(buckets.keys()):
             buckets[fam] = interleave_by_main_code(buckets[fam], rng)
-        # prefer family order from priority / candidateFamilies
         pref_order = []
         for p in effective_priority(req):
-            mapped = {"mcard_four": "mcard_four", "dual_1plus1": "dual_1plus1", "classic_three": "classic_three", "coffee": "coffee_combo"}.get(p)
+            mapped = {
+                "mcard_four": "mcard_four",
+                "dual_1plus1": "dual_1plus1",
+                "classic_three": "classic_three",
+                "coffee": "coffee_combo",
+            }.get(p)
             if mapped and mapped in buckets and mapped not in pref_order:
                 pref_order.append(mapped)
         for fam in (req.get("candidateFamilies") or []) + order:
@@ -1898,11 +1897,60 @@ def select_from_ranked(
                     progressed = True
             if not progressed:
                 break
-        pool = take_pool(mixed)
-    elif diversify and per_main > 0:
-        pool = take_pool(ranked)
-    else:
-        pool = ranked[: max(1, top_k)]
+        return take_pool(mixed)
+    if diversify and per_main > 0:
+        return take_pool(ranked)
+    return ranked[: max(1, top_k)]
+
+
+def select_presented(
+    ranked: List[ScoredCandidate],
+    req: Dict[str, Any],
+    seed: Optional[int] = None,
+) -> List[ScoredCandidate]:
+    """Build A/B/C presentation set: slot A = rank_only #1, rest from diversify pool."""
+    if not ranked:
+        return []
+    sel = req.get("selection") or {}
+    present_count = int(sel.get("presentCount") or 3)
+    present_count = max(1, present_count)
+    rng = random.Random(seed)
+    pool = diversification_pool(ranked, req, rng)
+    out: List[ScoredCandidate] = [ranked[0]]
+    seen = {ranked[0].rotation_key}
+    for cand in pool:
+        if len(out) >= present_count:
+            break
+        if cand.rotation_key in seen:
+            continue
+        seen.add(cand.rotation_key)
+        out.append(cand)
+    for cand in ranked:
+        if len(out) >= present_count:
+            break
+        if cand.rotation_key in seen:
+            continue
+        seen.add(cand.rotation_key)
+        out.append(cand)
+    return out[:present_count]
+
+
+def select_from_ranked(
+    ranked: List[ScoredCandidate],
+    req: Dict[str, Any],
+    rng: random.Random,
+) -> Tuple[ScoredCandidate, List[ScoredCandidate], str]:
+    sel = req.get("selection") or {}
+    mode = str(sel.get("mode") or "rank_then_random")
+    top_k = int(sel.get("topK") or 5)
+    random_mode = str(sel.get("random") or "uniform")
+    # diversifyByMain: at most one seat per primaryMainCode inside Top-K
+    diversify = sel.get("diversifyByMain")
+    if diversify is None:
+        diversify = True
+    per_main = int(sel.get("maxPerMainInTopK") or 1)
+    # diversifyByFamily: round-robin families so mcard/dual/coffee share Top-K
+    pool = diversification_pool(ranked, req, rng)
 
     if mode == "rank_only":
         # rank_only means "best score", not "first after family interleaving".

@@ -55,7 +55,8 @@ engine/
   mcp_cache.py                # 按门店/履约/餐段/预约隔离的快照缓存
   exposure_log.py             # 曝光/跳过/换餐/成交分轨（幂等）
   combo_edit.py               # 点名套餐排序、换餐差异、pending/calc 同步
-  stage_timer.py              # 阶段计时与不可归因间隙
+  stage_timer.py              # 阶段计时与不可归因间隙（含 run_start / stage-start CLI）
+  recommend_run.py            # 午间流水线：ingest / check-menu / build-score-calc / merge-quotes / promote
   evaluate_recommendations.py # 固定场景回归评估
   profiles/
     README.md
@@ -106,6 +107,7 @@ python3 profile_lib.py lunch breakfast
 | `prefs.preferSideCodes` | 小食软排序；空数组表示不额外偏好，仍枚举菜单小食轮 |
 | `selection.mode` | `rank_only` 取最高分；`rank_then_random` 在 Top-K 内抽取 |
 | `selection.topK` / `diversifyByMain` / `maxPerMainInTopK` / `diversifyByFamily` | 候选池构成 |
+| `selection.presentCount` | 午间并行核价套数（默认 3）；A=最高分，其余来自 diversify 池 |
 | `history` / `historyPath` | 少重复；磁盘格式见下 |
 | `historyWindowPicks` / `historyWindowDays` | 各轨近 N 次、近 N 天，取交集；设为 0 关闭 |
 | `prefs.unseenMainBoost` / `unseenSideBoost` / `unseenDrinkBoost` / `unseenComboCap` | 窗口内未见主食、小食、饮品的抬权系数与 `low_repeat` 上限（默认 1.22 / 1.12 / 1.12 / 1.32） |
@@ -133,6 +135,25 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
   --history-file runs/history/lunch.json --reset-history --record-pick \
   --seeds 1-10 --pretty
 ```
+
+午间脚本化（不调用 MCP；`--cache-root` 必填）：
+
+```bash
+python3 recommend_run.py ingest-menu --profile lunch --raw /path/query-meals.json \
+  --cache-root /path/cache/prewarm --out-dir runs/prewarm/2026-11-27 \
+  --reservation-date "2026-11-27 12:00"
+python3 recommend_run.py check-menu --profile lunch --raw /path/noon-menu.json \
+  --prewarm-dir runs/prewarm/2026-11-27   # 退出 0=命中 1=补详情 2=fallback
+python3 recommend_run.py build-score-calc --profile lunch --seed 20261127 \
+  --menu runs/prewarm/.../menu-slim.json --details-dir runs/meal-details \
+  --exposure-path runs/history/exposure-lunch.json --out-dir runs/noon
+python3 recommend_run.py merge-quotes --profile lunch --score runs/noon/score.json \
+  --calc-raw-dir runs/noon/calc-raw --out-dir runs/noon
+python3 recommend_run.py promote --profile lunch --menu runs/prewarm/.../menu-slim.json \
+  --from-reservation "2026-11-27 12:00" --from-cache-root ... --to-cache-root ...
+```
+
+稳定菜单指纹：`mcp_cache.stable_menu_fingerprint`（剥离时间戳信封）；详情缓存键上的 `menuFingerprint` 必须用稳定值。
 
 输出与退出码：
 

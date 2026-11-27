@@ -312,6 +312,13 @@
         "diversifyByFamily": {
           "type": "boolean",
           "description": "Top-K round-robin across mcard_four/dual_1plus1/classic_three/coffee_combo/dabao"
+        },
+        "presentCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 3,
+          "description": "How many sets to present for parallel calculate-price (A=rank_only #1, B/C from diversify pool)"
         }
       }
     },
