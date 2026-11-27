@@ -145,6 +145,83 @@ class BugbotFixesTest(unittest.TestCase):
             self.assertIn("9900016655", out)
             self.assertEqual(len(out), 1)
 
+    def test_calc_payload_reads_datetime_inside_unwrapped_data(self):
+        cst = timezone(timedelta(hours=8))
+        inner_dt = datetime.now(cst).replace(microsecond=0).isoformat()
+        raw = {
+            "success": True,
+            "traceId": "t-no-outer-dt",
+            "data": {
+                "price": 2390,
+                "productPrice": 2390,
+                "datetime": inner_dt,
+                "items": [],
+            },
+        }
+        calc_data, quoted_at = recommend_run.calc_payload_from_file(raw)
+        self.assertEqual(quoted_at, inner_dt)
+        self.assertEqual(calc_data.get("price"), 2390)
+
+    def test_merge_quotes_inner_payload_datetime(self):
+        items = [
+            {
+                "productCode": "9900016655",
+                "quantity": 1,
+                "roundList": [
+                    {"round": "1", "comboItemList": [{"code": "1010", "quantity": 1}]},
+                    {
+                        "round": "2",
+                        "comboItemList": [
+                            {
+                                "code": "522021",
+                                "quantity": 1,
+                                "modification": {"values": [{"code": "200002", "key": "0-0", "quantity": 1}]},
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
+        row = {
+            "presentLabel": "A",
+            "rotationKey": "rk_inner_dt",
+            "humanSummary": "测试套餐",
+            "items": items,
+            "storeCode": "400001",
+            "dining": "eat-in",
+            "mealPeriod": "lunch",
+            "priceFen": 2390,
+            "takeWayCodeHint": "eat-in",
+        }
+        cst = timezone(timedelta(hours=8))
+        inner_dt = datetime.now(cst).replace(microsecond=0).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            score_path = base / "score.json"
+            score_path.write_text(json.dumps({"presented": [row]}), encoding="utf-8")
+            calc_dir = base / "calc-raw"
+            calc_dir.mkdir()
+            calc_dir.joinpath("A.json").write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "traceId": "trace-only",
+                        "data": {"price": 2390, "productPrice": 2390, "items": items, "datetime": inner_dt},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_dir = base / "out"
+            args = argparse.Namespace(
+                profile="lunch",
+                score=str(score_path),
+                calc_raw_dir=str(calc_dir),
+                out_dir=str(out_dir),
+            )
+            self.assertEqual(recommend_run.cmd_merge_quotes(args), 0)
+            merged = load(out_dir / "merged-score.json")
+            self.assertTrue(merged["presented"][0].get("priceVerified"))
+
     def test_merge_quotes_uses_envelope_datetime(self):
         items = [
             {

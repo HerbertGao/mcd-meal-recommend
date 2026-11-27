@@ -106,8 +106,8 @@ def parse_run_seed(spec: str) -> int:
 
 
 def calc_payload_from_file(raw_doc: Any) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Unwrap calculate-price MCP JSON; keep envelope datetime for quote time."""
-    envelope_dt = str(raw_doc.get("datetime") or "") if isinstance(raw_doc, dict) else ""
+    """Unwrap calculate-price MCP JSON; resolve quote time for sync_snapshots."""
+    envelope_dt = str(raw_doc.get("datetime") or "").strip() if isinstance(raw_doc, dict) else ""
     calc_raw = unwrap_mcp_envelope(raw_doc)
     if isinstance(calc_raw, dict) and isinstance(calc_raw.get("data"), dict):
         calc_data: Dict[str, Any] = calc_raw["data"]
@@ -115,8 +115,20 @@ def calc_payload_from_file(raw_doc: Any) -> Tuple[Dict[str, Any], Optional[str]]
         calc_data = calc_raw
     else:
         calc_data = {}
-    quoted_at = str(calc_data.get("quotedAt") or calc_data.get("fetchedAt") or "") or envelope_dt or None
-    return calc_data, quoted_at
+
+    def pick_timestamp(*blobs: Any) -> str:
+        for key in ("quotedAt", "fetchedAt", "datetime"):
+            for blob in blobs:
+                if not isinstance(blob, dict):
+                    continue
+                val = str(blob.get(key) or "").strip()
+                if val:
+                    return val
+        return ""
+
+    extra = {"datetime": envelope_dt} if envelope_dt else {}
+    quoted_at = pick_timestamp(calc_data, calc_raw if isinstance(calc_raw, dict) else None, extra)
+    return calc_data, quoted_at or None
 
 
 def needed_detail_codes(menu: Dict[str, Any], req: Mapping[str, Any], details: Optional[Dict[str, Any]] = None) -> List[str]:
