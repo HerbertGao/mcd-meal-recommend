@@ -1,9 +1,11 @@
+import argparse
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +126,139 @@ class RecommendRunCliTest(unittest.TestCase):
             body = json.loads(chk.stdout.strip())
             self.assertEqual(body["status"], "hit")
             self.assertEqual(body["menuFingerprint"], fp)
+
+
+class BugbotFixesTest(unittest.TestCase):
+    def test_parse_run_seed_accepts_iso_date(self):
+        self.assertEqual(recommend_run.parse_run_seed("2026-11-27"), 20261127)
+        self.assertEqual(recommend_run.parse_run_seed("20261127"), 20261127)
+
+    def test_load_details_dir_ignores_menu_slim(self):
+        menu = load(EXAMPLES / "fixtures" / "menu.json")
+        detail = load(EXAMPLES / "fixtures" / "meal-details" / "9900016655.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "menu-slim.json").write_text(json.dumps(menu), encoding="utf-8")
+            (d / "manifest.json").write_text("{}", encoding="utf-8")
+            (d / "9900016655.json").write_text(json.dumps(detail), encoding="utf-8")
+            out = recommend_run._load_details_dir(d)
+            self.assertIn("9900016655", out)
+            self.assertEqual(len(out), 1)
+
+    def test_merge_quotes_uses_envelope_datetime(self):
+        items = [
+            {
+                "productCode": "9900016655",
+                "quantity": 1,
+                "roundList": [
+                    {"round": "1", "comboItemList": [{"code": "1010", "quantity": 1}]},
+                    {
+                        "round": "2",
+                        "comboItemList": [
+                            {
+                                "code": "522021",
+                                "quantity": 1,
+                                "modification": {"values": [{"code": "200002", "key": "0-0", "quantity": 1}]},
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
+        row = {
+            "presentLabel": "A",
+            "rotationKey": "rk_merge_test",
+            "humanSummary": "测试套餐",
+            "items": items,
+            "storeCode": "400001",
+            "dining": "eat-in",
+            "mealPeriod": "lunch",
+            "priceFen": 2390,
+            "takeWayCodeHint": "eat-in",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            score_path = base / "score.json"
+            score_path.write_text(json.dumps({"presented": [row]}), encoding="utf-8")
+            calc_dir = base / "calc-raw"
+            calc_dir.mkdir()
+            cst = timezone(timedelta(hours=8))
+            quoted_at = datetime.now(cst).replace(microsecond=0).isoformat()
+            calc_dir.joinpath("A.json").write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "datetime": quoted_at,
+                        "data": {"price": 2390, "productPrice": 2390, "items": items},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_dir = base / "out"
+            args = argparse.Namespace(
+                profile="lunch",
+                score=str(score_path),
+                calc_raw_dir=str(calc_dir),
+                out_dir=str(out_dir),
+            )
+            self.assertEqual(recommend_run.cmd_merge_quotes(args), 0)
+            merged = load(out_dir / "merged-score.json")
+            primary = merged["presented"][0]
+            self.assertTrue(primary.get("priceVerified"))
+            self.assertEqual(primary.get("payableFen"), 2390)
+
+    def test_ingest_menu_reservation_override_for_promote(self):
+        menu = load(EXAMPLES / "fixtures" / "menu.json")
+        wrapped = {"success": True, "data": menu, "datetime": "2026-11-27T11:00:00+08:00"}
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw.json"
+            raw.write_text(json.dumps(wrapped), encoding="utf-8")
+            cache_root = Path(tmp) / "cache"
+            out_dir = Path(tmp) / "prewarm"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(ENGINE / "recommend_run.py"),
+                    "ingest-menu",
+                    "--profile",
+                    "lunch",
+                    "--raw",
+                    str(raw),
+                    "--cache-root",
+                    str(cache_root),
+                    "--out-dir",
+                    str(out_dir),
+                    "--reservation-date",
+                    "2026-11-27 12:00",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(ENGINE),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            promote = subprocess.run(
+                [
+                    sys.executable,
+                    str(ENGINE / "recommend_run.py"),
+                    "promote",
+                    "--profile",
+                    "lunch",
+                    "--menu",
+                    str(out_dir / "menu-slim.json"),
+                    "--from-reservation",
+                    "2026-11-27 12:00",
+                    "--to-reservation",
+                    "",
+                    "--from-cache-root",
+                    str(cache_root),
+                    "--to-cache-root",
+                    str(Path(tmp) / "noon-cache"),
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(ENGINE),
+            )
+            self.assertEqual(promote.returncode, 0, promote.stderr + promote.stdout)
 
 
 class PromoteKeysTest(unittest.TestCase):

@@ -196,8 +196,8 @@ python3 engine/exposure_log.py --file runs/history/exposure-lunch.json summary -
 
 | 子命令 | 作用 |
 |---|---|
-| `ingest-menu` |  unwrap 信封 → slim → `stable_menu_fingerprint` → `needed-details.json` + manifest → `mcp_cache put` |
-| `ingest-details` | 按稳定指纹写入详情缓存；SKU 来自当日菜单 `discover_*`，硬编码仅退路 |
+| `ingest-menu` |  unwrap 信封 → slim → `stable_menu_fingerprint` → `needed-details.json` + manifest → `mcp_cache put`；可选 `--reservation-date` 覆盖缓存键（预热 `YYYY-MM-DD 12:00`） |
+| `ingest-details` | 按稳定指纹写入详情缓存；SKU 来自当日菜单 `discover_*`，硬编码仅退路；同样支持 `--reservation-date` |
 | `check-menu` | 午间 live 菜单与预热指纹比对：0=可复用，1=缺详情需补拉，2=预热不可用（全量 fallback） |
 | `build-score-calc` | build → score → `presented[]`（`presentCount` 默认 3，A=rank_only 第一，B/C 来自 diversify 池）→ `calc-requests/{A,B,C}.json` |
 | `merge-quotes` | 以 `calculate-price` 为唯一价源，经 `combo_edit.sync_snapshots` 合并三份快照 |

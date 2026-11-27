@@ -26,6 +26,7 @@ from profile_lib import SCRIPT_DIR, load_profile, profile_to_request
 
 CST = timezone(timedelta(hours=8))
 PRESENT_LABELS = ("A", "B", "C", "D", "E")
+PREWARM_ARTIFACT_JSON = frozenset({"manifest.json", "needed-details.json", "menu-slim.json"})
 
 
 def _load_json(path: Path) -> Any:
@@ -82,15 +83,40 @@ def load_profile_request(profile_name: str) -> Dict[str, Any]:
         return profile_to_request(prof)
 
 
-def cache_scope_from_request(req: Mapping[str, Any]) -> Dict[str, str]:
+def cache_scope_from_request(req: Mapping[str, Any], *, reservation_date: str = "") -> Dict[str, str]:
+    explicit = str(reservation_date or "").strip()
     return {
         "storeCode": str(req.get("storeCode") or ""),
         "dining": str(req.get("dining") or "eat-in"),
         "mealPeriod": str(req.get("mealPeriod") or "lunch"),
-        "reservationDate": str(req.get("reservationDate") or ""),
+        "reservationDate": explicit if explicit else str(req.get("reservationDate") or ""),
         "beCode": str(req.get("beCode") or ""),
         "addressId": str(req.get("addressId") or ""),
     }
+
+
+def parse_run_seed(spec: str) -> int:
+    """Accept YYYYMMDD, YYYY-MM-DD, or integer RNG seeds."""
+    text = str(spec).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+        return int(text.replace("-", ""))
+    if re.match(r"^\d{8}$", text):
+        return int(text)
+    return int(text)
+
+
+def calc_payload_from_file(raw_doc: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Unwrap calculate-price MCP JSON; keep envelope datetime for quote time."""
+    envelope_dt = str(raw_doc.get("datetime") or "") if isinstance(raw_doc, dict) else ""
+    calc_raw = unwrap_mcp_envelope(raw_doc)
+    if isinstance(calc_raw, dict) and isinstance(calc_raw.get("data"), dict):
+        calc_data: Dict[str, Any] = calc_raw["data"]
+    elif isinstance(calc_raw, dict):
+        calc_data = calc_raw
+    else:
+        calc_data = {}
+    quoted_at = str(calc_data.get("quotedAt") or calc_data.get("fetchedAt") or "") or envelope_dt or None
+    return calc_data, quoted_at
 
 
 def needed_detail_codes(menu: Dict[str, Any], req: Mapping[str, Any], details: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -119,7 +145,7 @@ def cmd_ingest_menu(args: argparse.Namespace) -> int:
         print("refusing ingest: payload does not look like a lunch menu", file=sys.stderr)
         return 2
     fp = stable_menu_fingerprint(menu)
-    scope = cache_scope_from_request(req)
+    scope = cache_scope_from_request(req, reservation_date=str(getattr(args, "reservation_date", "") or ""))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     slim_path = out_dir / "menu-slim.json"
@@ -158,7 +184,7 @@ def cmd_ingest_menu(args: argparse.Namespace) -> int:
 
 def cmd_ingest_details(args: argparse.Namespace) -> int:
     req = load_profile_request(args.profile)
-    scope = cache_scope_from_request(req)
+    scope = cache_scope_from_request(req, reservation_date=str(getattr(args, "reservation_date", "") or ""))
     menu_fp = str(args.menu_fingerprint or "").strip()
     if not menu_fp:
         print("menu-fingerprint required", file=sys.stderr)
@@ -169,7 +195,7 @@ def cmd_ingest_details(args: argparse.Namespace) -> int:
     cache = SnapshotCache(args.cache_root)
     ingested: List[str] = []
     for path in sorted(raw_dir.glob("*.json")):
-        if path.name in ("manifest.json", "needed-details.json"):
+        if path.name in PREWARM_ARTIFACT_JSON:
             continue
         try:
             detail = unwrap_mcp_envelope(_load_json(path))
@@ -246,10 +272,13 @@ def cmd_check_menu(args: argparse.Namespace) -> int:
 def _load_details_dir(path: Path) -> Dict[str, Any]:
     details: Dict[str, Any] = {}
     for p in path.glob("*.json"):
-        if p.name in ("manifest.json", "needed-details.json"):
+        if p.name in PREWARM_ARTIFACT_JSON:
             continue
-        detail = load_snapshot(p)
-        rounds_of(detail, path=str(p))
+        try:
+            detail = load_snapshot(p)
+            rounds_of(detail, path=str(p))
+        except ContractError:
+            continue
         details[p.stem] = detail
     return details
 
@@ -294,14 +323,7 @@ def _presented_response(cand: score_lunch.ScoredCandidate, ranked: List[score_lu
 
 def cmd_build_score_calc(args: argparse.Namespace) -> int:
     req = _build_request(args.profile, Path(args.menu), Path(args.details_dir), args.exposure_path)
-    if args.seed:
-        seed = (
-            int(str(args.seed).replace("-", "")[:8], 10)
-            if re.match(r"^\d{8}$", str(args.seed))
-            else int(args.seed)
-        )
-    else:
-        seed = None
+    seed = parse_run_seed(args.seed) if args.seed else None
     warnings: List[str] = []
     passed: List[score_lunch.ScoredCandidate] = []
     for c in req.get("candidates") or []:
@@ -391,15 +413,15 @@ def cmd_merge_quotes(args: argparse.Namespace) -> int:
             pending["quoteReason"] = "missing_calc_raw"
             merged_sets.append(pending)
             continue
-        calc_raw = unwrap_mcp_envelope(_load_json(calc_path))
-        calc_data = calc_raw.get("data") if isinstance(calc_raw, dict) and isinstance(calc_raw.get("data"), dict) else calc_raw
+        raw_doc = _load_json(calc_path)
+        calc_data, quoted_at = calc_payload_from_file(raw_doc)
         calc_snap = {
             "rotationKey": row.get("rotationKey"),
             "humanSummary": row.get("humanSummary"),
-            "items": (calc_data or {}).get("items") or row.get("items"),
-            "priceFen": (calc_data or {}).get("productPrice") or (calc_data or {}).get("price") or row.get("priceFen"),
-            "payableFen": (calc_data or {}).get("price"),
-            "quotedAt": (calc_data or {}).get("quotedAt") or (calc_raw or {}).get("datetime"),
+            "items": calc_data.get("items") or row.get("items"),
+            "priceFen": calc_data.get("productPrice") or calc_data.get("price") or row.get("priceFen"),
+            "payableFen": calc_data.get("price"),
+            "quotedAt": quoted_at,
             "storeCode": row.get("storeCode"),
             "dining": row.get("takeWayCodeHint") or row.get("dining") or "eat-in",
             "mealPeriod": row.get("mealPeriod"),
@@ -529,6 +551,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     add_cache_root(im)
     im.add_argument("--out-dir", required=True)
     im.add_argument("--expires-at", default="", help="optional readability marker only")
+    im.add_argument(
+        "--reservation-date",
+        default="",
+        help='cache isolation override (e.g. "YYYY-MM-DD 12:00" for prewarm; default profile reservationDate)',
+    )
 
     idet = sub.add_parser("ingest-details")
     idet.add_argument("--profile", required=True)
@@ -536,6 +563,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     idet.add_argument("--menu-fingerprint", required=True)
     add_cache_root(idet)
     idet.add_argument("--out-dir", default="")
+    idet.add_argument("--reservation-date", default="", help="same as ingest-menu")
 
     cm = sub.add_parser("check-menu")
     cm.add_argument("--profile", required=True)
@@ -544,7 +572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     bsc = sub.add_parser("build-score-calc")
     bsc.add_argument("--profile", required=True)
-    bsc.add_argument("--seed", required=True, help="YYYYMMDD or integer seed")
+    bsc.add_argument("--seed", required=True, help="YYYYMMDD, YYYY-MM-DD, or integer seed")
     bsc.add_argument("--menu", required=True)
     bsc.add_argument("--details-dir", required=True)
     bsc.add_argument("--exposure-path", default="")

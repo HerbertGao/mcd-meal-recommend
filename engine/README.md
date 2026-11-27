@@ -140,7 +140,8 @@ python3 score_lunch.py --profile lunch -i runs/request-lunch-built.json \
 
 ```bash
 python3 recommend_run.py ingest-menu --profile lunch --raw /path/query-meals.json \
-  --cache-root /path/cache/prewarm --out-dir runs/prewarm/2026-11-27
+  --cache-root /path/cache/prewarm --out-dir runs/prewarm/2026-11-27 \
+  --reservation-date "2026-11-27 12:00"
 python3 recommend_run.py check-menu --profile lunch --raw /path/noon-menu.json \
   --prewarm-dir runs/prewarm/2026-11-27   # 退出 0=命中 1=补详情 2=fallback
 python3 recommend_run.py build-score-calc --profile lunch --seed 20261127 \
